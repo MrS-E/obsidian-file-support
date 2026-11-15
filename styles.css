@@ -20,6 +20,7 @@
 }
 
 .file-support-metadata-action.is-disabled,
+.file-support-refresh-metadata-action.is-disabled,
 .file-support-embed-metadata-btn.is-disabled {
   opacity: 0.4;
   cursor: not-allowed;

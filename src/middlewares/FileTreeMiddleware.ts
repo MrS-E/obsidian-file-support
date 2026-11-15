@@ -21,6 +21,10 @@ import type {
   MetadataOpenOrCreateEventPayload,
   TreeDecorateEventPayload,
 } from "../types/contracts";
+import {
+  REFRESH_EXTRACTED_METADATA_ICON,
+  REFRESH_EXTRACTED_METADATA_TITLE,
+} from "./ExtractorMiddleware";
 
 export const COMPANION_CONTEXT_MENU_TITLE =
   "Open/Create companion metadata note";
@@ -484,7 +488,9 @@ export class FileTreeMiddleware {
 
   /**
    * Populate the Obsidian `file-menu` context menu with "Open/Create companion metadata note"
-   * when right-clicking an eligible target file while companion metadata is enabled.
+   * (for eligible target files) and "Refresh extracted metadata content" (when a verified
+   * companion `.md` note exists for the target file or when right-clicking the paired companion
+   * `.md` note itself) while companion metadata is enabled.
    */
   handleFileMenu(
     menu: Menu,
@@ -498,10 +504,42 @@ export class FileTreeMiddleware {
     if (!isTFileLike(file)) {
       return;
     }
-    if (
-      !this.pairResolver.isMetadataEnabled() ||
-      !this.pairResolver.isTargetEligible(file)
-    ) {
+    if (!this.pairResolver.isMetadataEnabled()) {
+      return;
+    }
+
+    if (normalizeExtension(file.extension) === "md") {
+      const pairedTarget = this.pairResolver.resolveTargetForCompanion(file);
+      if (!pairedTarget) {
+        return;
+      }
+      menu.addItem((item) => {
+        item
+          .setTitle(REFRESH_EXTRACTED_METADATA_TITLE)
+          .setIcon(REFRESH_EXTRACTED_METADATA_ICON)
+          .onClick(() => {
+            if (!this.eventBus) {
+              return;
+            }
+            void this.eventBus
+              .emit("metadata:extract", {
+                app: this.app,
+                targetFile: pairedTarget,
+                companionFile: file,
+                config: this.registry.getForFile(pairedTarget),
+              })
+              .catch((err) => {
+                console.warn(
+                  `[FileSupport] Failed to refresh extracted metadata from context menu for "${file.path}":`,
+                  err
+                );
+              });
+          });
+      });
+      return;
+    }
+
+    if (!this.pairResolver.isTargetEligible(file)) {
       return;
     }
 
@@ -527,6 +565,34 @@ export class FileTreeMiddleware {
             });
         });
     });
+
+    const pair = this.pairResolver.resolve(file);
+    if (pair?.companionFile) {
+      const companionFile = pair.companionFile;
+      menu.addItem((item) => {
+        item
+          .setTitle(REFRESH_EXTRACTED_METADATA_TITLE)
+          .setIcon(REFRESH_EXTRACTED_METADATA_ICON)
+          .onClick(() => {
+            if (!this.eventBus) {
+              return;
+            }
+            void this.eventBus
+              .emit("metadata:extract", {
+                app: this.app,
+                targetFile: file,
+                companionFile,
+                config: this.registry.getForFile(file),
+              })
+              .catch((err) => {
+                console.warn(
+                  `[FileSupport] Failed to refresh extracted metadata from context menu for "${file.path}":`,
+                  err
+                );
+              });
+          });
+      });
+    }
   }
 
   /**

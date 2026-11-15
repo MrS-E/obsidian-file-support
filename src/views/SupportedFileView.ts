@@ -6,8 +6,13 @@ import {
   resolveFileTypeConfig,
 } from "../core/FileTypeRegistry";
 import type { LazyPairResolver } from "../metadata/LazyPairResolver";
+import {
+  REFRESH_EXTRACTED_METADATA_ICON,
+  REFRESH_EXTRACTED_METADATA_TITLE,
+} from "../middlewares/ExtractorMiddleware";
 import type {
   ConfigUpdatedEventPayload,
+  ContentExtractorResult,
   EditMode,
   FileOpenEventPayload,
   FileTypeConfig,
@@ -71,6 +76,7 @@ export class SupportedFileView extends TextFileView {
   private rendererInstance: RendererInstance | null = null;
   private editorHostEl: HTMLElement | null = null;
   private metadataActionEl: HTMLElement | null = null;
+  private refreshMetadataActionEl: HTMLElement | null = null;
   private unsubscribeConfig: UnsubscribeFn | null = null;
   private currentMode: EditMode = "readonly";
   private mountedFilePath: string | null = null;
@@ -232,6 +238,10 @@ export class SupportedFileView extends TextFileView {
     return this.metadataActionEl;
   }
 
+  getRefreshMetadataActionElement(): HTMLElement | null {
+    return this.refreshMetadataActionEl;
+  }
+
   /**
    * Dispatch `metadata:open-or-create` for the currently active target file.
    */
@@ -246,11 +256,51 @@ export class SupportedFileView extends TextFileView {
         targetFile: file,
         openInNewLeaf: false,
       });
+      this.updateMetadataActionVisibility();
     } catch (err) {
       console.warn(
         `[FileSupport] Failed to open or create companion metadata for "${file.path}":`,
         err
       );
+    }
+  }
+
+  /**
+   * Dispatch `metadata:extract` to refresh extracted metadata content in the companion `.md`
+   * note paired with the currently active target file.
+   */
+  async refreshExtractedMetadata(
+    targetFile?: TFile | null
+  ): Promise<ContentExtractorResult | null> {
+    const file = targetFile ?? this.file;
+    if (!file) {
+      return null;
+    }
+    if (
+      !this.plugin.settings?.enableMetadataFiles ||
+      (this.plugin.pairResolver &&
+        !this.plugin.pairResolver.isTargetEligible(file))
+    ) {
+      return null;
+    }
+    const pair = this.plugin.pairResolver?.resolve(file);
+    if (!pair?.companionFile) {
+      return null;
+    }
+    try {
+      const res = await this.plugin.eventBus.emit("metadata:extract", {
+        app: this.app,
+        targetFile: file,
+        companionFile: pair.companionFile,
+        config: this.resolveConfigForFile(file),
+      });
+      return res.result ?? null;
+    } catch (err) {
+      console.warn(
+        `[FileSupport] Failed to refresh extracted metadata for "${file.path}":`,
+        err
+      );
+      return null;
     }
   }
 
@@ -276,6 +326,28 @@ export class SupportedFileView extends TextFileView {
       }
     }
 
+    if (
+      !this.refreshMetadataActionEl &&
+      typeof this.addAction === "function"
+    ) {
+      this.refreshMetadataActionEl = this.addAction(
+        REFRESH_EXTRACTED_METADATA_ICON,
+        REFRESH_EXTRACTED_METADATA_TITLE,
+        () => {
+          void this.refreshExtractedMetadata();
+        }
+      );
+      if (this.refreshMetadataActionEl) {
+        this.refreshMetadataActionEl.setAttribute?.(
+          "data-file-support-action",
+          "refresh-metadata"
+        );
+        this.refreshMetadataActionEl.classList?.add(
+          "file-support-refresh-metadata-action"
+        );
+      }
+    }
+
     this.updateMetadataActionVisibility();
 
     if (!this.unsubscribeConfig) {
@@ -292,19 +364,35 @@ export class SupportedFileView extends TextFileView {
   }
 
   private updateMetadataActionVisibility(): void {
-    if (!this.metadataActionEl) {
-      return;
-    }
     const enabled =
       Boolean(this.plugin.settings?.enableMetadataFiles) &&
       (!this.file ||
         !this.plugin.pairResolver ||
         this.plugin.pairResolver.isTargetEligible(this.file));
-    this.metadataActionEl.classList?.toggle("is-disabled", !enabled);
-    this.metadataActionEl.setAttribute?.(
-      "aria-disabled",
-      enabled ? "false" : "true"
-    );
+
+    if (this.metadataActionEl) {
+      this.metadataActionEl.classList?.toggle("is-disabled", !enabled);
+      this.metadataActionEl.setAttribute?.(
+        "aria-disabled",
+        enabled ? "false" : "true"
+      );
+    }
+
+    if (this.refreshMetadataActionEl) {
+      const hasCompanion = Boolean(
+        enabled &&
+          this.file &&
+          this.plugin.pairResolver?.resolve(this.file)?.companionFile
+      );
+      this.refreshMetadataActionEl.classList?.toggle(
+        "is-disabled",
+        !hasCompanion
+      );
+      this.refreshMetadataActionEl.setAttribute?.(
+        "aria-disabled",
+        hasCompanion ? "false" : "true"
+      );
+    }
   }
 
   private resolveConfigForFile(file: TFile): FileTypeConfig {

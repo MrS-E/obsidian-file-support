@@ -161,11 +161,16 @@ export interface RendererMiddleware {
 }
 
 /**
- *Result produced by a ContentExtractorAdapter.
+ * Result produced by a ContentExtractorAdapter.
  */
 export interface ContentExtractorResult {
   markdownBody: string;
   frontmatterProps?: Record<string, unknown>;
+  /**
+   * When true, indicates the extractor intentionally performs a no-op on the Markdown body
+   * (e.g. NoOpPassthroughExtractor), leaving existing companion note body content untouched.
+   */
+  skipBodyUpdate?: boolean;
 }
 
 /**
@@ -174,7 +179,11 @@ export interface ContentExtractorResult {
 export interface ContentExtractorAdapter {
   readonly id: string;
   supports(file: TFile, config: FileTypeConfig): boolean;
-  extract(file: TFile, app: App): Promise<ContentExtractorResult>;
+  extract(
+    file: TFile,
+    app: App,
+    config?: FileTypeConfig
+  ): Promise<ContentExtractorResult>;
 }
 
 /**

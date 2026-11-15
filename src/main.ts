@@ -12,7 +12,13 @@ import {
   createLivePreviewEmbedExtension,
   processMarkdownEmbeds,
 } from "./embeds/FileEmbedWidget";
+import { ExtractorRegistry } from "./extractors/ExtractorRegistry";
 import { LazyPairResolver } from "./metadata/LazyPairResolver";
+import {
+  ExtractorMiddleware,
+  REFRESH_EXTRACTED_METADATA_COMMAND_ID,
+  REFRESH_EXTRACTED_METADATA_TITLE,
+} from "./middlewares/ExtractorMiddleware";
 import {
   COMPANION_CONTEXT_MENU_TITLE,
   FileTreeMiddleware,
@@ -29,7 +35,11 @@ import {
   mergePluginSettings,
   serializePluginSettings,
 } from "./settings/PluginSettings";
-import type { FileTypeConfig, PluginSettings } from "./types/contracts";
+import type {
+  ContentExtractorResult,
+  FileTypeConfig,
+  PluginSettings,
+} from "./types/contracts";
 import {
   SupportedFileView,
   VIEW_TYPE_FILE_SUPPORT,
@@ -91,6 +101,13 @@ export default class FileSupportPlugin
     () => this.settings,
     this.registry
   );
+  extractorRegistry: ExtractorRegistry = new ExtractorRegistry();
+  extractorMiddleware: ExtractorMiddleware = new ExtractorMiddleware(
+    this.app,
+    this.extractorRegistry,
+    this.registry,
+    this.pairResolver
+  );
   metadataCompanionMiddleware: MetadataCompanionMiddleware =
     new MetadataCompanionMiddleware(this.app, this.pairResolver);
   fileTreeMiddleware: FileTreeMiddleware = new FileTreeMiddleware(
@@ -108,8 +125,10 @@ export default class FileSupportPlugin
     await this.loadSettings();
 
     this.pairResolver.setApp(this.app);
+    this.extractorMiddleware.setApp(this.app);
     this.metadataCompanionMiddleware.setApp(this.app);
     this.fileTreeMiddleware.setApp(this.app);
+    this.extractorMiddleware.register(this.eventBus);
     this.metadataCompanionMiddleware.register(this.eventBus);
     this.textCodeRendererMiddleware.register(this.eventBus);
     this.fileTreeMiddleware.register(this.eventBus);
@@ -161,6 +180,41 @@ export default class FileSupportPlugin
       },
     });
 
+    this.addCommand({
+      id: REFRESH_EXTRACTED_METADATA_COMMAND_ID,
+      name: REFRESH_EXTRACTED_METADATA_TITLE,
+      checkCallback: (checking: boolean) => {
+        const targetFile = this.getActiveTargetFile();
+        if (!targetFile) {
+          return false;
+        }
+        const pair = this.pairResolver.resolve(targetFile);
+        if (!pair?.companionFile) {
+          return false;
+        }
+        if (!checking) {
+          void this.refreshExtractedMetadataForFile(targetFile);
+        }
+        return true;
+      },
+      callback: () => {
+        const targetFile = this.getActiveTargetFile();
+        if (!targetFile) {
+          if (!this.pairResolver.isMetadataEnabled()) {
+            new Notice(
+              "Companion metadata notes are disabled in File Support settings."
+            );
+          } else {
+            new Notice(
+              "No eligible active file to refresh extracted metadata content for."
+            );
+          }
+          return;
+        }
+        void this.refreshExtractedMetadataForFile(targetFile);
+      },
+    });
+
     this.addSettingTab(new FileSupportSettingTab(this.app, this));
   }
 
@@ -169,6 +223,7 @@ export default class FileSupportPlugin
     this.unregisterAllViewExtensions();
     this.fileTreeMiddleware.destroy();
     this.metadataCompanionMiddleware.destroy();
+    this.extractorMiddleware.destroy();
     this.textCodeRendererMiddleware.destroy();
     this.eventBus.clear();
   }
@@ -234,6 +289,48 @@ export default class FileSupportPlugin
       openInNewLeaf,
     });
     return res.companionFile ?? null;
+  }
+
+  /**
+   * Dispatch `metadata:extract` to refresh extracted metadata content in the companion `.md`
+   * note paired with `targetOrCompanionFile` (accepting either the target file or its paired
+   * companion `.md` note).
+   */
+  async refreshExtractedMetadataForFile(
+    targetOrCompanionFile: TFile
+  ): Promise<ContentExtractorResult | null> {
+    if (!targetOrCompanionFile || !this.pairResolver.isMetadataEnabled()) {
+      return null;
+    }
+
+    let targetFile: TFile | null = null;
+    if (normalizeExtension(targetOrCompanionFile.extension) === "md") {
+      targetFile = this.pairResolver.resolveTargetForCompanion(
+        targetOrCompanionFile
+      );
+    } else if (this.pairResolver.isTargetEligible(targetOrCompanionFile)) {
+      targetFile = targetOrCompanionFile;
+    }
+
+    if (!targetFile) {
+      return null;
+    }
+
+    const pair = this.pairResolver.resolve(targetFile);
+    if (!pair?.companionFile) {
+      new Notice(
+        `No companion metadata note exists for "${targetFile.name}".`
+      );
+      return null;
+    }
+
+    const res = await this.eventBus.emit("metadata:extract", {
+      app: this.app,
+      targetFile,
+      companionFile: pair.companionFile,
+      config: this.registry.getForFile(targetFile),
+    });
+    return res.result ?? null;
   }
 
   isExtensionRegisteredInEmbedRegistry(extension: string): boolean {
