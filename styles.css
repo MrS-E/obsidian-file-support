@@ -7,14 +7,22 @@
 }
 
 /* Companion Metadata File Explorer Decoration */
-.nav-file.is-companion-hidden {
+.nav-file.is-companion-hidden,
+.nav-file-title.is-companion-hidden {
   display: none !important;
 }
 
+.nav-file.has-companion-metadata .nav-file-title-content,
 .nav-file-title.has-companion-metadata .nav-file-title-content {
   text-decoration: underline;
   text-decoration-thickness: 1.5px;
   text-underline-offset: 3px;
+}
+
+.file-support-metadata-action.is-disabled,
+.file-support-embed-metadata-btn.is-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* Dedicated Tab View & CodeMirror 6 Wrapper */

@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 import { EventBus } from "./core/EventBus";
 import {
   FileTypeRegistry,
@@ -13,6 +13,10 @@ import {
   processMarkdownEmbeds,
 } from "./embeds/FileEmbedWidget";
 import { LazyPairResolver } from "./metadata/LazyPairResolver";
+import {
+  COMPANION_CONTEXT_MENU_TITLE,
+  FileTreeMiddleware,
+} from "./middlewares/FileTreeMiddleware";
 import { MetadataCompanionMiddleware } from "./middlewares/MetadataCompanionMiddleware";
 import { TextCodeRendererMiddleware } from "./middlewares/TextCodeRendererMiddleware";
 import { RendererRegistry } from "./renderers/RendererRegistry";
@@ -89,6 +93,11 @@ export default class FileSupportPlugin
   );
   metadataCompanionMiddleware: MetadataCompanionMiddleware =
     new MetadataCompanionMiddleware(this.app, this.pairResolver);
+  fileTreeMiddleware: FileTreeMiddleware = new FileTreeMiddleware(
+    this.app,
+    this.registry,
+    this.pairResolver
+  );
 
   private lastSavedSettings: PluginSettings = createDefaultSettings();
   private registeredViewExtensions: Set<string> = new Set();
@@ -100,8 +109,10 @@ export default class FileSupportPlugin
 
     this.pairResolver.setApp(this.app);
     this.metadataCompanionMiddleware.setApp(this.app);
+    this.fileTreeMiddleware.setApp(this.app);
     this.metadataCompanionMiddleware.register(this.eventBus);
     this.textCodeRendererMiddleware.register(this.eventBus);
+    this.fileTreeMiddleware.register(this.eventBus);
 
     this.registerView(
       VIEW_TYPE_FILE_SUPPORT,
@@ -119,15 +130,110 @@ export default class FileSupportPlugin
       this.registerEditorExtension(createLivePreviewEmbedExtension(this));
     }
 
+    this.addCommand({
+      id: "open-or-create-companion-metadata",
+      name: COMPANION_CONTEXT_MENU_TITLE,
+      checkCallback: (checking: boolean) => {
+        const targetFile = this.getActiveTargetFile();
+        if (!targetFile) {
+          return false;
+        }
+        if (!checking) {
+          void this.openOrCreateCompanionForFile(targetFile);
+        }
+        return true;
+      },
+      callback: () => {
+        const targetFile = this.getActiveTargetFile();
+        if (!targetFile) {
+          if (!this.pairResolver.isMetadataEnabled()) {
+            new Notice(
+              "Companion metadata notes are disabled in File Support settings."
+            );
+          } else {
+            new Notice(
+              "No eligible active file to open or create a companion metadata note for."
+            );
+          }
+          return;
+        }
+        void this.openOrCreateCompanionForFile(targetFile);
+      },
+    });
+
     this.addSettingTab(new FileSupportSettingTab(this.app, this));
   }
 
   async onunload(): Promise<void> {
     this.unregisterAllEmbedRegistryExtensions();
     this.unregisterAllViewExtensions();
+    this.fileTreeMiddleware.destroy();
     this.metadataCompanionMiddleware.destroy();
     this.textCodeRendererMiddleware.destroy();
     this.eventBus.clear();
+  }
+
+  /**
+   * Resolve the currently active eligible target file in the workspace (or the target file
+   * paired with the currently active companion `.md` note).
+   */
+  getActiveTargetFile(): TFile | null {
+    if (!this.pairResolver.isMetadataEnabled()) {
+      return null;
+    }
+
+    const candidates: Array<TFile | null | undefined> = [];
+    const workspace = this.app?.workspace as any;
+
+    if (typeof workspace?.getActiveViewOfType === "function") {
+      const supportedView = workspace.getActiveViewOfType(
+        SupportedFileView
+      ) as SupportedFileView | null;
+      if (supportedView?.file) {
+        candidates.push(supportedView.file);
+      }
+    }
+
+    if (workspace?.activeLeaf?.view?.file) {
+      candidates.push(workspace.activeLeaf.view.file);
+    }
+
+    if (typeof workspace?.getActiveFile === "function") {
+      candidates.push(workspace.getActiveFile());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+      if (this.pairResolver.isTargetEligible(candidate)) {
+        return candidate;
+      }
+      if (normalizeExtension(candidate.extension) === "md") {
+        const pairedTarget =
+          this.pairResolver.resolveTargetForCompanion(candidate);
+        if (pairedTarget) {
+          return pairedTarget;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Dispatch `metadata:open-or-create` for `targetFile` via the central `EventBus`.
+   */
+  async openOrCreateCompanionForFile(
+    targetFile: TFile,
+    openInNewLeaf: boolean = false
+  ): Promise<TFile | null> {
+    const res = await this.eventBus.emit("metadata:open-or-create", {
+      app: this.app,
+      targetFile,
+      openInNewLeaf,
+    });
+    return res.companionFile ?? null;
   }
 
   isExtensionRegisteredInEmbedRegistry(extension: string): boolean {

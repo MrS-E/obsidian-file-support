@@ -246,6 +246,7 @@ export class Plugin extends Component {
   _registeredExtensions: Array<{ extensions: string[]; viewType: string }> = [];
   _postProcessors: any[] = [];
   _editorExtensions: any[] = [];
+  _commands: any[] = [];
 
   constructor(app?: App, manifest?: any) {
     super();
@@ -262,8 +263,9 @@ export class Plugin extends Component {
   }
 
   addSettingTab(_settingTab: PluginSettingTab): void {}
-  addCommand(_command: any): any {
-    return _command;
+  addCommand(command: any): any {
+    this._commands.push(command);
+    return command;
   }
   registerView(type: string, viewCreator: (leaf: WorkspaceLeaf) => any): void {
     this._views[type] = viewCreator;
@@ -699,6 +701,59 @@ export class Notice {
   }
 }
 
+export class MenuItem {
+  title: string = "";
+  icon: string = "";
+  disabled: boolean = false;
+  section: string = "";
+  callback: ((evt: MouseEvent | KeyboardEvent) => any) | null = null;
+
+  setTitle(title: string): this {
+    this.title = title;
+    return this;
+  }
+
+  setIcon(icon: string): this {
+    this.icon = icon;
+    return this;
+  }
+
+  setDisabled(disabled: boolean): this {
+    this.disabled = disabled;
+    return this;
+  }
+
+  setSection(section: string): this {
+    this.section = section;
+    return this;
+  }
+
+  onClick(callback: (evt: MouseEvent | KeyboardEvent) => any): this {
+    this.callback = callback;
+    return this;
+  }
+
+  triggerClick(evt?: any): any {
+    if (this.disabled) return;
+    return this.callback?.(evt ?? new MouseEvent("click"));
+  }
+}
+
+export class Menu {
+  items: MenuItem[] = [];
+
+  addItem(cb: (item: MenuItem) => any): this {
+    const item = new MenuItem();
+    this.items.push(item);
+    cb(item);
+    return this;
+  }
+
+  addSeparator(): this {
+    return this;
+  }
+}
+
 function createEventEmitterTarget<T extends Record<string, any>>(
   target: T
 ): T & Pick<Events, "on" | "off" | "offref" | "trigger" | "listenerCount"> {
@@ -769,6 +824,8 @@ export class App {
   workspace: any = createEventEmitterTarget({
     getLeavesOfType: (_type: string) => [],
     getLeaf: (_newLeaf?: boolean) => new WorkspaceLeaf(),
+    getActiveFile: () => null,
+    getActiveViewOfType: (_type: any) => null,
     onLayoutReady: (cb: () => void) => cb(),
   });
 }

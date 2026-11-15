@@ -5,6 +5,7 @@ import {
   normalizeExtension,
   resolveFileTypeConfig,
 } from "../core/FileTypeRegistry";
+import type { LazyPairResolver } from "../metadata/LazyPairResolver";
 import type {
   ConfigUpdatedEventPayload,
   EditMode,
@@ -21,6 +22,7 @@ export interface FileSupportViewHost {
   settings: PluginSettings;
   registry: FileTypeRegistry;
   eventBus: EventBus;
+  pairResolver?: LazyPairResolver;
 }
 
 function clearElement(el: HTMLElement): void {
@@ -293,7 +295,11 @@ export class SupportedFileView extends TextFileView {
     if (!this.metadataActionEl) {
       return;
     }
-    const enabled = Boolean(this.plugin.settings?.enableMetadataFiles);
+    const enabled =
+      Boolean(this.plugin.settings?.enableMetadataFiles) &&
+      (!this.file ||
+        !this.plugin.pairResolver ||
+        this.plugin.pairResolver.isTargetEligible(this.file));
     this.metadataActionEl.classList?.toggle("is-disabled", !enabled);
     this.metadataActionEl.setAttribute?.(
       "aria-disabled",
