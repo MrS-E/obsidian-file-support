@@ -203,4 +203,23 @@ describe("EventBus", () => {
     bus.clear();
     expect(bus.listenerCount("tree:decorate")).toBe(0);
   });
+
+  it("isolates errors thrown by individual listeners so remaining listeners still run", async () => {
+    const bus = new EventBus();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const secondListener = vi.fn();
+
+    bus.on("config:updated", () => {
+      throw new Error("Listener failure");
+    });
+    bus.on("config:updated", secondListener);
+
+    await expect(
+      bus.emit("config:updated", { settings: createDefaultSettings() })
+    ).resolves.toBeDefined();
+
+    expect(secondListener).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
 });

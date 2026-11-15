@@ -117,6 +117,9 @@ export function createMockElement(tag: string = "div"): any {
     },
     empty() {
       children.length = 0;
+      if (Array.isArray(el._settings)) {
+        el._settings.length = 0;
+      }
       el.textContent = "";
       el.innerHTML = "";
     },
@@ -400,9 +403,16 @@ export class TextFileView {
 }
 
 export class Notice {
+  static instances: Notice[] = [];
   message: string;
+
+  static clear(): void {
+    Notice.instances = [];
+  }
+
   constructor(message: string) {
     this.message = message;
+    Notice.instances.push(this);
   }
 }
 

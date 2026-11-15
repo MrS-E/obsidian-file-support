@@ -1,9 +1,16 @@
 import {
+  DEFAULT_FILE_TYPE_PRESETS,
   createDefaultFileTypeConfigs,
-  normalizeExtension,
+  isBuiltInExtension,
   resolveFileTypeConfig,
+  validateExtension,
 } from "../core/FileTypeRegistry";
-import type { FileTypeConfig, PluginSettings } from "../types/contracts";
+import type {
+  BuiltInFileTypeOverride,
+  FileTypeConfig,
+  PersistedPluginSettings,
+  PluginSettings,
+} from "../types/contracts";
 
 export interface RegexValidationResult {
   valid: boolean;
@@ -51,26 +58,47 @@ export const DEFAULT_SETTINGS: Readonly<PluginSettings> = Object.freeze(
 
 /**
  * Merge partial or persisted settings data with built-in defaults.
- * Preserves user overrides on built-in extensions as well as custom user-added extensions.
+ * Preserves user overrides on built-in extensions as well as custom user-added extensions,
+ * while ignoring malformed or reserved extension entries.
  */
 export function mergePluginSettings(
-  raw?: Partial<PluginSettings> | Record<string, unknown> | null
+  raw?:
+    | Partial<PluginSettings>
+    | PersistedPluginSettings
+    | Record<string, unknown>
+    | null
 ): PluginSettings {
   const defaults = createDefaultSettings();
-  if (!raw || typeof raw !== "object") {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return defaults;
   }
 
-  const saved = raw as Partial<PluginSettings>;
+  const saved = raw as Record<string, unknown>;
   const mergedFileTypes: Record<string, FileTypeConfig> =
     createDefaultFileTypeConfigs();
 
-  if (saved.fileTypes && typeof saved.fileTypes === "object") {
-    for (const [rawKey, partial] of Object.entries(saved.fileTypes)) {
-      if (!partial || typeof partial !== "object") continue;
-      const ext = normalizeExtension(partial.extension || rawKey);
-      if (!ext) continue;
-      mergedFileTypes[ext] = resolveFileTypeConfig(ext, partial);
+  if (
+    saved.fileTypes &&
+    typeof saved.fileTypes === "object" &&
+    !Array.isArray(saved.fileTypes)
+  ) {
+    for (const [rawKey, partial] of Object.entries(
+      saved.fileTypes as Record<string, unknown>
+    )) {
+      if (!partial || typeof partial !== "object" || Array.isArray(partial)) {
+        continue;
+      }
+      const p = partial as Partial<FileTypeConfig>;
+      const candidate =
+        typeof p.extension === "string" && p.extension.trim().length > 0
+          ? p.extension
+          : rawKey;
+      const validation = validateExtension(candidate);
+      if (!validation.valid) {
+        continue;
+      }
+      const ext = validation.extension;
+      mergedFileTypes[ext] = resolveFileTypeConfig(ext, p);
     }
   }
 
@@ -113,16 +141,49 @@ export function mergePluginSettings(
 }
 
 /**
- * Produce a clean JSON-serializable clone of PluginSettings for persistence.
+ * Produce a clean JSON-serializable payload of PluginSettings for persistence in data.json.
+ * For built-in presets, only user-overridable fields (`extension`, `badgeLabel`, `tabMode`,
+ * `embedMode`, `enabled`, and optional overridden `extractorId`) are persisted.
+ * For custom user-added extensions, the full validated `FileTypeConfig` is persisted.
  */
 export function serializePluginSettings(
-  settings: PluginSettings
-): PluginSettings {
+  settings: PluginSettings | PersistedPluginSettings
+): PersistedPluginSettings {
   const normalized = mergePluginSettings(settings);
-  const fileTypes: Record<string, FileTypeConfig> = {};
+  const fileTypes: Record<string, BuiltInFileTypeOverride | FileTypeConfig> =
+    {};
+
   for (const [ext, cfg] of Object.entries(normalized.fileTypes)) {
-    fileTypes[ext] = { ...cfg };
+    if (isBuiltInExtension(ext)) {
+      const preset = DEFAULT_FILE_TYPE_PRESETS[ext];
+      const override: BuiltInFileTypeOverride = {
+        extension: cfg.extension,
+        badgeLabel: cfg.badgeLabel,
+        tabMode: cfg.tabMode,
+        embedMode: cfg.embedMode,
+        enabled: cfg.enabled,
+      };
+      if (cfg.extractorId && cfg.extractorId !== preset.extractorId) {
+        override.extractorId = cfg.extractorId;
+      }
+      fileTypes[ext] = override;
+    } else {
+      fileTypes[ext] = {
+        extension: cfg.extension,
+        category: cfg.category,
+        badgeLabel: cfg.badgeLabel,
+        languageId: cfg.languageId,
+        syntaxLanguage: cfg.syntaxLanguage ?? cfg.languageId,
+        rendererId: cfg.rendererId,
+        tabMode: cfg.tabMode,
+        embedMode: cfg.embedMode,
+        enabled: cfg.enabled,
+        extractorId: cfg.extractorId,
+        isCustom: true,
+      };
+    }
   }
+
   return {
     fileTypes,
     enableMetadataFiles: normalized.enableMetadataFiles,

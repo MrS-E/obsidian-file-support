@@ -1,8 +1,8 @@
-import { App, Plugin, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
 import type { EventBus } from "../core/EventBus";
 import {
   FileTypeRegistry,
-  normalizeExtension,
+  validateExtension,
 } from "../core/FileTypeRegistry";
 import type {
   EditMode,
@@ -168,15 +168,29 @@ export class FileSupportSettingTab extends PluginSettingTab {
           .setButtonText("Add extension")
           .setCta()
           .onClick(async () => {
-            const ext = normalizeExtension(this.newExtensionInput);
-            if (!ext) return;
-            const badge = this.newExtensionBadge.trim().toUpperCase() || ext.toUpperCase();
-            await this.plugin.addCustomFileType(ext, {
-              badgeLabel: badge,
-            });
-            this.newExtensionInput = "";
-            this.newExtensionBadge = "";
-            this.display();
+            const validation = validateExtension(this.newExtensionInput);
+            if (!validation.valid) {
+              new Notice(validation.error ?? "Invalid file extension.");
+              return;
+            }
+            const ext = validation.extension;
+            if (this.plugin.registry.isRegistered(ext)) {
+              new Notice(`Extension ".${ext}" is already registered.`);
+              return;
+            }
+            const badge =
+              this.newExtensionBadge.trim().toUpperCase() ||
+              ext.toUpperCase();
+            try {
+              await this.plugin.addCustomFileType(ext, {
+                badgeLabel: badge,
+              });
+              this.newExtensionInput = "";
+              this.newExtensionBadge = "";
+              this.display();
+            } catch {
+              // Notice already displayed by addCustomFileType
+            }
           })
       );
   }

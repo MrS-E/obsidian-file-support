@@ -163,7 +163,14 @@ export class EventBus<
 
       if (i === applicableMiddlewares.length) {
         for (const handler of handlers) {
-          await handler(payload);
+          try {
+            await handler(payload);
+          } catch (err) {
+            console.error(
+              `[FileSupportEventBus] Unhandled error in listener for "${String(event)}":`,
+              err
+            );
+          }
         }
       }
     };

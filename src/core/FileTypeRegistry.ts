@@ -8,7 +8,141 @@ import type {
  * Normalize a raw file extension string to lowercase without leading dots.
  */
 export function normalizeExtension(ext: string): string {
+  if (typeof ext !== "string") {
+    return "";
+  }
   return ext.trim().replace(/^\.+/, "").toLowerCase();
+}
+
+const VALID_EDIT_MODES: ReadonlySet<EditMode> = new Set([
+  "editable",
+  "readonly",
+]);
+
+const VALID_FILE_CATEGORIES: ReadonlySet<FileCategory> = new Set([
+  "text",
+  "code",
+  "data",
+  "log",
+  "patch",
+  "binary",
+  "custom",
+]);
+
+/**
+ * Extensions natively owned by Obsidian core (notes, canvas, base, PDF, images, audio, video)
+ * that must not be claimed as custom extensions.
+ */
+export const RESERVED_OBSIDIAN_EXTENSIONS: ReadonlySet<string> = new Set([
+  // Core Markdown, Canvas, Bases
+  "md",
+  "markdown",
+  "canvas",
+  "base",
+  // Documents
+  "pdf",
+  // Images
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "bmp",
+  "svg",
+  "webp",
+  "avif",
+  "ico",
+  "tif",
+  "tiff",
+  // Audio
+  "mp3",
+  "wav",
+  "m4a",
+  "ogg",
+  "3gp",
+  "flac",
+  "opus",
+  "aac",
+  // Video
+  "mp4",
+  "webm",
+  "ogv",
+  "mov",
+  "mkv",
+  "avi",
+]);
+
+const VALID_EXTENSION_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+export type ExtensionValidationErrorReason =
+  | "empty"
+  | "invalid_format"
+  | "reserved";
+
+export interface ExtensionValidationResult {
+  valid: boolean;
+  extension: string;
+  reason?: ExtensionValidationErrorReason;
+  error?: string;
+}
+
+/**
+ * Validate a raw file extension string against syntax rules and Obsidian reserved types.
+ */
+export function validateExtension(
+  rawExtension: unknown
+): ExtensionValidationResult {
+  if (typeof rawExtension !== "string") {
+    return {
+      valid: false,
+      extension: "",
+      reason: "empty",
+      error: "File extension cannot be empty.",
+    };
+  }
+
+  const norm = normalizeExtension(rawExtension);
+  if (!norm) {
+    return {
+      valid: false,
+      extension: "",
+      reason: "empty",
+      error: "File extension cannot be empty.",
+    };
+  }
+
+  if (!VALID_EXTENSION_PATTERN.test(norm)) {
+    return {
+      valid: false,
+      extension: norm,
+      reason: "invalid_format",
+      error: `Invalid file extension "${norm}". Extensions may only contain letters, numbers, hyphens, and underscores (no spaces, slashes, or dots).`,
+    };
+  }
+
+  if (RESERVED_OBSIDIAN_EXTENSIONS.has(norm)) {
+    return {
+      valid: false,
+      extension: norm,
+      reason: "reserved",
+      error: `Extension ".${norm}" is reserved by Obsidian for native files.`,
+    };
+  }
+
+  return {
+    valid: true,
+    extension: norm,
+  };
+}
+
+export function isValidEditMode(value: unknown): value is EditMode {
+  return typeof value === "string" && VALID_EDIT_MODES.has(value as EditMode);
+}
+
+export function isValidFileCategory(value: unknown): value is FileCategory {
+  return (
+    typeof value === "string" &&
+    VALID_FILE_CATEGORIES.has(value as FileCategory)
+  );
 }
 
 function createPreset(
@@ -66,6 +200,14 @@ export const DEFAULT_FILE_TYPE_PRESETS: Readonly<
 });
 
 /**
+ * Check whether an extension corresponds to a built-in default preset.
+ */
+export function isBuiltInExtension(extension: string): boolean {
+  const norm = normalizeExtension(extension);
+  return Object.prototype.hasOwnProperty.call(DEFAULT_FILE_TYPE_PRESETS, norm);
+}
+
+/**
  * Create a mutable deep clone of all default file type configurations.
  */
 export function createDefaultFileTypeConfigs(): Record<string, FileTypeConfig> {
@@ -77,63 +219,109 @@ export function createDefaultFileTypeConfigs(): Record<string, FileTypeConfig> {
 }
 
 /**
- * Normalize and complete a partial FileTypeConfig against either its built-in preset
- * or sensible defaults for custom user-added extensions.
+ * Normalize, validate, and whitelist a partial FileTypeConfig against either its
+ * built-in preset or sensible defaults for custom user-added extensions.
+ *
+ * For built-in presets, only user-overridable fields (`badgeLabel`, `tabMode`,
+ * `embedMode`, `enabled`, `extractorId`) are merged from `partial`, ensuring preset
+ * fields (`languageId`, `syntaxLanguage`, `rendererId`, `category`, `isCustom`) stay up to date.
  */
 export function resolveFileTypeConfig(
   extension: string,
-  partial?: Partial<FileTypeConfig>
+  partial?: Partial<FileTypeConfig> | Record<string, unknown>
 ): FileTypeConfig {
-  const norm = normalizeExtension(extension || partial?.extension || "");
-  if (!norm) {
-    throw new Error("File extension cannot be empty");
+  const rawCandidate =
+    extension ||
+    (partial && typeof partial.extension === "string" ? partial.extension : "");
+  const validation = validateExtension(rawCandidate);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? "Invalid file extension.");
   }
+  const norm = validation.extension;
+  const p = (
+    partial && typeof partial === "object" && !Array.isArray(partial)
+      ? partial
+      : {}
+  ) as Partial<FileTypeConfig>;
 
   const preset = DEFAULT_FILE_TYPE_PRESETS[norm];
-  const base: FileTypeConfig = preset
-    ? { ...preset }
-    : {
-        extension: norm,
-        category: "custom",
-        badgeLabel: norm.toUpperCase(),
-        languageId: "plaintext",
-        syntaxLanguage: "plaintext",
-        rendererId: "cm6-text",
-        tabMode: "editable",
-        embedMode: "readonly",
-        enabled: true,
-        extractorId: "passthrough",
-        isCustom: true,
-      };
+  if (preset) {
+    const badgeLabel =
+      typeof p.badgeLabel === "string" && p.badgeLabel.trim().length > 0
+        ? p.badgeLabel.trim().toUpperCase()
+        : preset.badgeLabel;
+    const tabMode: EditMode = isValidEditMode(p.tabMode)
+      ? p.tabMode
+      : preset.tabMode;
+    const embedMode: EditMode = isValidEditMode(p.embedMode)
+      ? p.embedMode
+      : preset.embedMode;
+    const enabled =
+      typeof p.enabled === "boolean" ? p.enabled : preset.enabled;
+    const extractorId =
+      typeof p.extractorId === "string" && p.extractorId.trim().length > 0
+        ? p.extractorId.trim()
+        : preset.extractorId;
 
-  const languageId =
-    partial?.languageId ?? partial?.syntaxLanguage ?? base.languageId;
-  const syntaxLanguage =
-    partial?.syntaxLanguage ?? partial?.languageId ?? base.syntaxLanguage ?? languageId;
-  const tabMode: EditMode =
-    partial?.tabMode === "readonly" || partial?.tabMode === "editable"
-      ? partial.tabMode
-      : base.tabMode;
-  const embedMode: EditMode =
-    partial?.embedMode === "readonly" || partial?.embedMode === "editable"
-      ? partial.embedMode
-      : base.embedMode;
+    return {
+      extension: preset.extension,
+      category: preset.category,
+      badgeLabel,
+      languageId: preset.languageId,
+      syntaxLanguage: preset.syntaxLanguage ?? preset.languageId,
+      rendererId: preset.rendererId,
+      tabMode,
+      embedMode,
+      enabled,
+      extractorId,
+      isCustom: false,
+    };
+  }
+
+  const category: FileCategory = isValidFileCategory(p.category)
+    ? p.category
+    : "custom";
   const badgeLabel =
-    typeof partial?.badgeLabel === "string" && partial.badgeLabel.trim().length > 0
-      ? partial.badgeLabel.trim().toUpperCase()
-      : base.badgeLabel;
+    typeof p.badgeLabel === "string" && p.badgeLabel.trim().length > 0
+      ? p.badgeLabel.trim().toUpperCase()
+      : norm.toUpperCase();
+  const languageId =
+    typeof p.languageId === "string" && p.languageId.trim().length > 0
+      ? p.languageId.trim()
+      : typeof p.syntaxLanguage === "string" &&
+          p.syntaxLanguage.trim().length > 0
+        ? p.syntaxLanguage.trim()
+        : "plaintext";
+  const syntaxLanguage =
+    typeof p.syntaxLanguage === "string" && p.syntaxLanguage.trim().length > 0
+      ? p.syntaxLanguage.trim()
+      : languageId;
+  const rendererId =
+    typeof p.rendererId === "string" && p.rendererId.trim().length > 0
+      ? p.rendererId.trim()
+      : "cm6-text";
+  const tabMode: EditMode = isValidEditMode(p.tabMode) ? p.tabMode : "editable";
+  const embedMode: EditMode = isValidEditMode(p.embedMode)
+    ? p.embedMode
+    : "readonly";
+  const enabled = typeof p.enabled === "boolean" ? p.enabled : true;
+  const extractorId =
+    typeof p.extractorId === "string" && p.extractorId.trim().length > 0
+      ? p.extractorId.trim()
+      : "passthrough";
 
   return {
-    ...base,
-    ...partial,
     extension: norm,
+    category,
     badgeLabel,
     languageId,
     syntaxLanguage,
+    rendererId,
     tabMode,
     embedMode,
-    enabled: typeof partial?.enabled === "boolean" ? partial.enabled : base.enabled,
-    isCustom: preset ? false : (partial?.isCustom ?? true),
+    enabled,
+    extractorId,
+    isCustom: true,
   };
 }
 
@@ -163,13 +351,35 @@ export class FileTypeRegistry {
 
   /**
    * Apply user setting overrides and custom extensions on top of built-in defaults.
+   * Silently ignores malformed or reserved extension entries in persisted data.
    */
-  applySettings(settingsFileTypes: Record<string, Partial<FileTypeConfig>>): void {
+  applySettings(
+    settingsFileTypes: Record<string, Partial<FileTypeConfig>>
+  ): void {
     this.resetToDefaults();
-    for (const [rawKey, partial] of Object.entries(settingsFileTypes ?? {})) {
-      const ext = normalizeExtension(partial?.extension || rawKey);
-      if (!ext) continue;
-      this.configs.set(ext, resolveFileTypeConfig(ext, partial));
+    if (
+      !settingsFileTypes ||
+      typeof settingsFileTypes !== "object" ||
+      Array.isArray(settingsFileTypes)
+    ) {
+      return;
+    }
+    for (const [rawKey, partial] of Object.entries(settingsFileTypes)) {
+      if (!partial || typeof partial !== "object" || Array.isArray(partial)) {
+        continue;
+      }
+      const candidate =
+        typeof partial.extension === "string" && partial.extension.trim()
+          ? partial.extension
+          : rawKey;
+      const validation = validateExtension(candidate);
+      if (!validation.valid) {
+        continue;
+      }
+      this.configs.set(
+        validation.extension,
+        resolveFileTypeConfig(validation.extension, partial)
+      );
     }
   }
 
@@ -238,20 +448,24 @@ export class FileTypeRegistry {
   }
 
   /**
-   * Register a new custom extension or override an existing extension's configuration.
+   * Register a new custom extension.
+   * Rejects empty, malformed, reserved Obsidian core extensions, or already-registered extensions.
    */
   register(
     config: Partial<FileTypeConfig> & { extension: string }
   ): FileTypeConfig {
-    const ext = normalizeExtension(config.extension);
-    if (!ext) {
-      throw new Error("File extension cannot be empty");
+    const validation = validateExtension(config?.extension);
+    if (!validation.valid) {
+      throw new Error(validation.error ?? "Invalid file extension.");
     }
-    const existing = this.configs.get(ext);
+    const ext = validation.extension;
+    if (this.configs.has(ext)) {
+      throw new Error(`Extension ".${ext}" is already registered.`);
+    }
     const merged = resolveFileTypeConfig(ext, {
-      ...existing,
       ...config,
       extension: ext,
+      isCustom: true,
     });
     this.configs.set(ext, merged);
     return { ...merged };
@@ -279,11 +493,30 @@ export class FileTypeRegistry {
   }
 
   /**
-   * Unregister a custom extension (or reset a built-in extension if requested).
+   * Unregister a custom user-added extension.
+   * Built-in presets cannot be unregistered (returns `false`).
    */
   unregister(extension: string): boolean {
     const ext = normalizeExtension(extension);
+    const existing = this.configs.get(ext);
+    if (!existing || !existing.isCustom || isBuiltInExtension(ext)) {
+      return false;
+    }
     return this.configs.delete(ext);
+  }
+
+  /**
+   * Reset a built-in extension back to its default preset configuration.
+   */
+  resetConfig(extension: string): FileTypeConfig | undefined {
+    const ext = normalizeExtension(extension);
+    const preset = DEFAULT_FILE_TYPE_PRESETS[ext];
+    if (!preset) {
+      return undefined;
+    }
+    const restored: FileTypeConfig = { ...preset };
+    this.configs.set(ext, restored);
+    return { ...restored };
   }
 
   /**

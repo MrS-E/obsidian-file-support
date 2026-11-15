@@ -1,23 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
-import {
-  createMockApp,
-  createMockManifest,
-  createMockTFile,
-} from "./__mocks__/obsidian";
+import { describe, expect, it } from "vitest";
+import { createMockTFile } from "./__mocks__/obsidian";
 import {
   DEFAULT_FILE_TYPE_PRESETS,
   FileTypeRegistry,
+  RESERVED_OBSIDIAN_EXTENSIONS,
+  isBuiltInExtension,
   normalizeExtension,
+  resolveFileTypeConfig,
+  validateExtension,
 } from "../src/core/FileTypeRegistry";
-import FileSupportPlugin from "../src/main";
-import { FileSupportSettingTab } from "../src/settings/FileSupportSettingTab";
-import {
-  DEFAULT_SETTINGS,
-  createDefaultSettings,
-  mergePluginSettings,
-  serializePluginSettings,
-  validateDirectoryRegex,
-} from "../src/settings/PluginSettings";
 
 describe("FileTypeRegistry", () => {
   it("provides default presets with editable tabs for code/txt and read-only tabs for log/patch/diff", () => {
@@ -51,6 +42,7 @@ describe("FileTypeRegistry", () => {
       expect(cfg?.embedMode).toBe("readonly");
       expect(cfg?.badgeLabel).toBe(ext.toUpperCase());
       expect(cfg?.isCustom).toBe(false);
+      expect(isBuiltInExtension(ext)).toBe(true);
     }
 
     for (const ext of readonlyTabExtensions) {
@@ -61,6 +53,7 @@ describe("FileTypeRegistry", () => {
       expect(cfg?.embedMode).toBe("readonly");
       expect(cfg?.badgeLabel).toBe(ext.toUpperCase());
       expect(cfg?.isCustom).toBe(false);
+      expect(isBuiltInExtension(ext)).toBe(true);
     }
   });
 
@@ -78,7 +71,7 @@ describe("FileTypeRegistry", () => {
     expect(registry.getForFile("README_NO_EXT")).toBeUndefined();
   });
 
-  it("applies user overrides and supports custom extension registration and removal", () => {
+  it("applies user overrides, supports custom extension registration/removal, and refuses unregistering built-ins", () => {
     const registry = new FileTypeRegistry();
 
     registry.updateConfig("log", {
@@ -93,6 +86,15 @@ describe("FileTypeRegistry", () => {
     expect(updatedLog?.badgeLabel).toBe("SYSLOG");
     expect(registry.getEffectiveTabMode("log")).toBe("editable");
     expect(registry.getEffectiveEmbedMode("log")).toBe("editable");
+
+    // Refuses unregistering built-in extensions
+    expect(registry.unregister("log")).toBe(false);
+    expect(registry.isRegistered("log")).toBe(true);
+
+    // Can reset built-in extension back to default preset
+    const resetLog = registry.resetConfig("log");
+    expect(resetLog?.tabMode).toBe("readonly");
+    expect(resetLog?.badgeLabel).toBe("LOG");
 
     // Register a custom extension
     const custom = registry.register({
@@ -116,133 +118,134 @@ describe("FileTypeRegistry", () => {
     expect(registry.unregister("gradle")).toBe(true);
     expect(registry.isRegistered("gradle")).toBe(false);
   });
-});
 
-describe("PluginSettings & FileSupportSettingTab", () => {
-  it("defaults enableMetadataFiles to false and merges partial persisted settings cleanly", () => {
-    expect(DEFAULT_SETTINGS.enableMetadataFiles).toBe(false);
-    expect(DEFAULT_SETTINGS.metadataDirRegex).toBe(".*");
-    expect(DEFAULT_SETTINGS.metadataFrontmatterKey).toBe("file-support-target");
+  it("validates custom extensions against empty input, invalid characters, reserved Obsidian types, and duplicates", () => {
+    const registry = new FileTypeRegistry();
 
-    const merged = mergePluginSettings({
-      enableMetadataFiles: true,
-      metadataDirRegex: "^logs/",
-      fileTypes: {
-        log: {
-          extension: "log",
-          tabMode: "editable",
-          embedMode: "readonly",
-          enabled: true,
-          badgeLabel: "LOG",
-          category: "log",
-          languageId: "log",
-          rendererId: "cm6-text",
-        },
-        ".conf": {
-          extension: "conf",
-          tabMode: "readonly",
-          embedMode: "readonly",
-          enabled: true,
-          badgeLabel: "CONF",
-          category: "custom",
-          languageId: "properties",
-          rendererId: "cm6-text",
-        },
-      },
-    });
+    // Empty / dot-only inputs
+    for (const emptyInput of ["", "   ", ".", "...", null as any, 123 as any]) {
+      const res = validateExtension(emptyInput);
+      expect(res.valid).toBe(false);
+      expect(res.reason).toBe("empty");
+      expect(() =>
+        registry.register({ extension: emptyInput as string })
+      ).toThrow();
+    }
 
-    expect(merged.enableMetadataFiles).toBe(true);
-    expect(merged.metadataDirRegex).toBe("^logs/");
-    // Overridden built-in preset
-    expect(merged.fileTypes.log.tabMode).toBe("editable");
-    // Unmentioned built-in preset preserved
-    expect(merged.fileTypes.c.tabMode).toBe("editable");
-    expect(merged.fileTypes.patch.tabMode).toBe("readonly");
-    // Custom extension normalized and preserved
-    expect(merged.fileTypes.conf).toBeDefined();
-    expect(merged.fileTypes.conf.isCustom).toBe(true);
-    expect(merged.fileTypes.conf.tabMode).toBe("readonly");
+    // Invalid characters: whitespace, slashes, internal dots, special punctuation
+    for (const badFormat of [
+      "my ext",
+      "a/b",
+      "a\\b",
+      "tar.gz",
+      "file.name.ext",
+      "c$",
+      "@bad",
+      "-leading-dash",
+    ]) {
+      const res = validateExtension(badFormat);
+      expect(res.valid).toBe(false);
+      expect(res.reason).toBe("invalid_format");
+      expect(() => registry.register({ extension: badFormat })).toThrow(
+        /Invalid file extension/
+      );
+    }
 
-    const serialized = serializePluginSettings(merged);
-    expect(JSON.parse(JSON.stringify(serialized))).toEqual(serialized);
+    // Reserved Obsidian core extensions (md, canvas, pdf, images, audio, video)
+    for (const reserved of [
+      "md",
+      ".MD",
+      "markdown",
+      "canvas",
+      "base",
+      "pdf",
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "svg",
+      "webp",
+      "mp3",
+      "wav",
+      "ogg",
+      "flac",
+      "mp4",
+      "webm",
+      "mov",
+      "mkv",
+    ]) {
+      const norm = normalizeExtension(reserved);
+      expect(RESERVED_OBSIDIAN_EXTENSIONS.has(norm)).toBe(true);
+      const res = validateExtension(reserved);
+      expect(res.valid).toBe(false);
+      expect(res.reason).toBe("reserved");
+      expect(() => registry.register({ extension: reserved })).toThrow(
+        /reserved by Obsidian/
+      );
+    }
+
+    // Duplicate registration of existing built-in or custom extension
+    expect(() =>
+      registry.register({ extension: "log", badgeLabel: "CHANGED" })
+    ).toThrow(/already registered/);
+    expect(registry.get("log")?.badgeLabel).toBe("LOG");
+
+    registry.register({ extension: "cmake", badgeLabel: "CMAKE" });
+    expect(() =>
+      registry.register({ extension: ".CMAKE", badgeLabel: "OTHER" })
+    ).toThrow(/already registered/);
+    expect(registry.get("cmake")?.badgeLabel).toBe("CMAKE");
   });
 
-  it("validates directory regex patterns without throwing on malformed input", () => {
-    const valid = validateDirectoryRegex("^notes/(logs|patches)$");
-    expect(valid.valid).toBe(true);
-    expect(valid.regex?.test("notes/logs")).toBe(true);
+  it("whitelists fields in resolveFileTypeConfig and keeps built-in preset metadata upgradable", () => {
+    // Attempt to override non-overridable built-in fields (languageId, rendererId, category, isCustom)
+    // and inject unknown junk keys
+    const resolvedBuiltIn = resolveFileTypeConfig("h", {
+      extension: "h",
+      badgeLabel: "header",
+      tabMode: "readonly",
+      embedMode: "editable",
+      enabled: false,
+      languageId: "stale-lang",
+      syntaxLanguage: "stale-lang",
+      rendererId: "stale-renderer",
+      category: "custom",
+      isCustom: true,
+      junkKey: "should-be-stripped",
+    } as any);
 
-    const invalid = validateDirectoryRegex("[unclosed-group");
-    expect(invalid.valid).toBe(false);
-    expect(invalid.regex).toBeNull();
-    expect(invalid.error).toBeDefined();
-  });
-
-  it("persists setting updates and emits config:updated via FileSupportPlugin and FileSupportSettingTab", async () => {
-    const app = createMockApp() as any;
-    const plugin = new FileSupportPlugin(app, createMockManifest());
-    await plugin.onload();
-
-    const configUpdatedSpy = vi.fn();
-    plugin.eventBus.on("config:updated", configUpdatedSpy);
-
-    await plugin.updateFileTypeConfig("log", { tabMode: "editable" });
-    expect(plugin.registry.getEffectiveTabMode("log")).toBe("editable");
-    expect(configUpdatedSpy).toHaveBeenCalledTimes(1);
-    expect(configUpdatedSpy.mock.calls[0][0].changedExtensions).toEqual(["log"]);
-
-    await plugin.addCustomFileType(".cmake", { badgeLabel: "CMAKE" });
-    expect(plugin.registry.isSupported("cmake")).toBe(true);
-
-    // Render setting tab and verify controls
-    const settingTab = new FileSupportSettingTab(app, plugin);
-    settingTab.display();
-    const settingsList = (settingTab.containerEl as any)._settings ?? [];
-    expect(settingsList.length).toBeGreaterThan(
-      Object.keys(DEFAULT_FILE_TYPE_PRESETS).length
+    expect(resolvedBuiltIn.badgeLabel).toBe("HEADER");
+    expect(resolvedBuiltIn.tabMode).toBe("readonly");
+    expect(resolvedBuiltIn.embedMode).toBe("editable");
+    expect(resolvedBuiltIn.enabled).toBe(false);
+    // Non-overridable preset fields always match current DEFAULT_FILE_TYPE_PRESETS.h
+    expect(resolvedBuiltIn.languageId).toBe(DEFAULT_FILE_TYPE_PRESETS.h.languageId);
+    expect(resolvedBuiltIn.syntaxLanguage).toBe(
+      DEFAULT_FILE_TYPE_PRESETS.h.syntaxLanguage
     );
+    expect(resolvedBuiltIn.rendererId).toBe(DEFAULT_FILE_TYPE_PRESETS.h.rendererId);
+    expect(resolvedBuiltIn.category).toBe(DEFAULT_FILE_TYPE_PRESETS.h.category);
+    expect(resolvedBuiltIn.isCustom).toBe(false);
+    expect("junkKey" in resolvedBuiltIn).toBe(false);
 
-    // Exercise companion metadata toggle and directory regex validation UI
-    const enableMetaSetting = settingsList.find(
-      (s: any) => s.nameEl.textContent === "Enable companion .md metadata files"
-    );
-    expect(enableMetaSetting).toBeDefined();
-    await enableMetaSetting.components[0].component.triggerChange(true);
-    expect(plugin.settings.enableMetadataFiles).toBe(true);
+    // Custom file type validates field types and strips unknown keys
+    const resolvedCustom = resolveFileTypeConfig("proto", {
+      extension: "proto",
+      tabMode: "invalid-mode" as any,
+      embedMode: 123 as any,
+      category: "not-a-category" as any,
+      rendererId: "" as any,
+      extractorId: null as any,
+      extraGarbage: { nested: true },
+    } as any);
 
-    const regexSetting = settingsList.find(
-      (s: any) => s.nameEl.textContent === "Companion metadata directory regex"
-    );
-    expect(regexSetting).toBeDefined();
-    const regexTextComp = regexSetting.components[0].component;
-    await regexTextComp.triggerChange("[invalid");
-    expect(
-      regexTextComp.inputEl.classList.contains(
-        "file-support-settings-regex-error"
-      )
-    ).toBe(true);
-    await regexTextComp.triggerChange("^logs/");
-    expect(
-      regexTextComp.inputEl.classList.contains(
-        "file-support-settings-regex-error"
-      )
-    ).toBe(false);
-    expect(plugin.settings.metadataDirRegex).toBe("^logs/");
-
-    // Exercise per-file-type controls for .patch
-    const patchSetting = settingsList.find(
-      (s: any) => s.nameEl.textContent === ".patch"
-    );
-    expect(patchSetting).toBeDefined();
-    // [0] = badge text, [1] = tabMode dropdown, [2] = embedMode dropdown, [3] = enabled toggle
-    await patchSetting.components[1].component.triggerChange("editable");
-    expect(plugin.registry.getEffectiveTabMode("patch")).toBe("editable");
-    await patchSetting.components[2].component.triggerChange("editable");
-    expect(plugin.registry.getEffectiveEmbedMode("patch")).toBe("editable");
-    await patchSetting.components[3].component.triggerChange(false);
-    expect(plugin.registry.isSupported("patch")).toBe(false);
-
-    await plugin.removeCustomFileType("cmake");
-    expect(plugin.registry.isRegistered("cmake")).toBe(false);
+    expect(resolvedCustom.extension).toBe("proto");
+    expect(resolvedCustom.isCustom).toBe(true);
+    expect(resolvedCustom.tabMode).toBe("editable");
+    expect(resolvedCustom.embedMode).toBe("readonly");
+    expect(resolvedCustom.category).toBe("custom");
+    expect(resolvedCustom.rendererId).toBe("cm6-text");
+    expect(resolvedCustom.extractorId).toBe("passthrough");
+    expect("extraGarbage" in resolvedCustom).toBe(false);
   });
 });

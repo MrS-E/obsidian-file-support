@@ -46,7 +46,34 @@ export interface FileTypeConfig {
 }
 
 /**
- * Persisted plugin settings structure.
+ * User-overridable fields persisted for a built-in file type preset.
+ */
+export interface BuiltInFileTypeOverride {
+  extension: string;
+  badgeLabel: string;
+  tabMode: EditMode;
+  embedMode: EditMode;
+  enabled: boolean;
+  extractorId?: string;
+}
+
+/**
+ * Persisted plugin settings structure stored in Obsidian's data.json.
+ * Built-in file types store only user-overridable fields so preset metadata
+ * (languageId, rendererId, category) remains upgradable across versions.
+ * Custom user-added file types store their full FileTypeConfig.
+ */
+export interface PersistedPluginSettings {
+  fileTypes: Record<string, BuiltInFileTypeOverride | FileTypeConfig>;
+  enableMetadataFiles: boolean;
+  metadataDirRegex: string;
+  metadataFrontmatterKey: string;
+  metadataDefaultTags: string[];
+  autoRunExtractorOnCreate: boolean;
+}
+
+/**
+ * In-memory resolved plugin settings structure.
  */
 export interface PluginSettings {
   /** Per-file-type configurations keyed by lowercase extension. */
