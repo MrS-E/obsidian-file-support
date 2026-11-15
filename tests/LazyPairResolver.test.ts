@@ -437,8 +437,9 @@ describe("MetadataCompanionMiddleware EventBus & Vault Lifecycle", () => {
       tags: ["file-metadata"],
     });
 
-    // Calling metadata:open-or-create a second time opens existing `logs/app.md` without calling vault.create again
+    // Calling metadata:open-or-create a second time opens existing `logs/app.md` without calling vault.create or processFrontMatter again
     env.app.vault.create.mockClear();
+    env.app.fileManager.processFrontMatter.mockClear();
     extractSpy.mockClear();
     const reopenedPrimary = await bus.emit("metadata:open-or-create", {
       app: env.app,
@@ -446,6 +447,7 @@ describe("MetadataCompanionMiddleware EventBus & Vault Lifecycle", () => {
     });
     expect(reopenedPrimary.companionFile?.path).toBe("logs/app.md");
     expect(env.app.vault.create).not.toHaveBeenCalled();
+    expect(env.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
     expect(extractSpy).not.toHaveBeenCalled();
 
     // 3. Sibling `logs/app.json` collides on `logs/app.md` -> creates `logs/app.json.md`
@@ -649,5 +651,278 @@ describe("MetadataCompanionMiddleware EventBus & Vault Lifecycle", () => {
     await plugin.onunload();
     expect(env.app.vault.listenerCount("rename")).toBe(0);
     expect(env.app.vault.listenerCount("delete")).toBe(0);
+    expect(env.app.metadataCache.listenerCount("changed")).toBe(0);
+    expect(env.app.metadataCache.listenerCount("deleted")).toBe(0);
+  });
+
+  it("does not rewrite YAML frontmatter or re-add user-removed default tags on reopen or target rename", async () => {
+    const env = createInMemoryVaultEnv();
+    const settings: PluginSettings = {
+      ...createDefaultSettings(),
+      enableMetadataFiles: true,
+      metadataDirRegex: ".*",
+      metadataDefaultTags: ["file-metadata", "default-tag"],
+    };
+    const registry = new FileTypeRegistry();
+    const bus = new EventBus();
+    const resolver = new LazyPairResolver(env.app, () => settings, registry);
+    const middleware = new MetadataCompanionMiddleware(env.app, resolver);
+    middleware.register(bus);
+
+    const logFile = env.addFile("logs/app.log");
+
+    // 1. Initial creation writes default tags
+    const created = await bus.emit("metadata:open-or-create", {
+      app: env.app,
+      targetFile: logFile,
+    });
+    expect(created.companionFile?.path).toBe("logs/app.md");
+    expect(env.frontmatters.get("logs/app.md")).toEqual({
+      "file-support-target": "[[app.log]]",
+      tags: ["file-metadata", "default-tag"],
+    });
+
+    // 2. User edits companion note frontmatter: removes default tags and uses singular `tag:` key
+    env.frontmatters.set("logs/app.md", {
+      "file-support-target": "[[app.log]]",
+      tag: "user-curated-only",
+      notes: "keep intact",
+    });
+    env.app.fileManager.processFrontMatter.mockClear();
+    env.app.vault.create.mockClear();
+
+    // 3. Reopening the companion note must NOT call processFrontMatter or re-add removed default tags
+    const reopened = await bus.emit("metadata:open-or-create", {
+      app: env.app,
+      targetFile: logFile,
+    });
+    expect(reopened.companionFile?.path).toBe("logs/app.md");
+    expect(env.app.vault.create).not.toHaveBeenCalled();
+    expect(env.app.fileManager.processFrontMatter).not.toHaveBeenCalled();
+    expect(env.frontmatters.get("logs/app.md")).toEqual({
+      "file-support-target": "[[app.log]]",
+      tag: "user-curated-only",
+      notes: "keep intact",
+    });
+
+    // 4. Renaming target file updates `file-support-target` without re-adding removed default tags or mutating `tag:`
+    const oldPath = env.renameTargetInVault(logFile, "logs/renamed-app.log");
+    await middleware.handleVaultRename(logFile, oldPath);
+
+    expect(env.frontmatters.get("logs/renamed-app.md")).toEqual({
+      "file-support-target": "[[renamed-app.log]]",
+      tag: "user-curated-only",
+      notes: "keep intact",
+    });
+
+    middleware.destroy();
+  });
+
+  it("serializes concurrent metadata:open-or-create calls so vault.create runs once and callers receive the same TFile", async () => {
+    const env = createInMemoryVaultEnv();
+    const settings: PluginSettings = {
+      ...createDefaultSettings(),
+      enableMetadataFiles: true,
+      metadataDirRegex: ".*",
+    };
+    const registry = new FileTypeRegistry();
+    const bus = new EventBus();
+    const resolver = new LazyPairResolver(env.app, () => settings, registry);
+    const middleware = new MetadataCompanionMiddleware(env.app, resolver);
+    middleware.register(bus);
+
+    // Add async delay to vault.create so concurrent callers overlap while creation is still pending
+    const baseCreate = env.app.vault.create;
+    env.app.vault.create = vi.fn(async (path: string, data: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      if (env.files.has(normalizePath(path))) {
+        throw new Error(`File already exists: ${path}`);
+      }
+      return baseCreate(path, data);
+    });
+
+    const logFile = env.addFile("logs/concurrent.log");
+
+    // 1. Two concurrent open-or-create emissions for the SAME target file
+    const [res1, res2] = await Promise.all([
+      bus.emit("metadata:open-or-create", {
+        app: env.app,
+        targetFile: logFile,
+      }),
+      bus.emit("metadata:open-or-create", {
+        app: env.app,
+        targetFile: logFile,
+      }),
+    ]);
+
+    expect(env.app.vault.create).toHaveBeenCalledTimes(1);
+    expect(env.app.fileManager.processFrontMatter).toHaveBeenCalledTimes(1);
+    expect(res1.companionFile).not.toBeNull();
+    expect(res1.companionFile).toBe(res2.companionFile);
+    expect(res1.companionFile?.path).toBe("logs/concurrent.md");
+
+    // 2. Concurrent open-or-create emissions for two SIBLING files sharing the same basename
+    env.app.vault.create.mockClear();
+    const sibLog = env.addFile("logs/shared.log");
+    const sibJson = env.addFile("logs/shared.json");
+
+    const [sibRes1, sibRes2] = await Promise.all([
+      bus.emit("metadata:open-or-create", {
+        app: env.app,
+        targetFile: sibLog,
+      }),
+      bus.emit("metadata:open-or-create", {
+        app: env.app,
+        targetFile: sibJson,
+      }),
+    ]);
+
+    expect(env.app.vault.create).toHaveBeenCalledTimes(2);
+    expect(sibRes1.companionFile?.path).toBe("logs/shared.md");
+    expect(sibRes2.companionFile?.path).toBe("logs/shared.json.md");
+
+    middleware.destroy();
+  });
+
+  it("catches processFrontMatter and vault errors during open-or-create and rename without unhandled rejections", async () => {
+    const env = createInMemoryVaultEnv();
+    const settings: PluginSettings = {
+      ...createDefaultSettings(),
+      enableMetadataFiles: true,
+      metadataDirRegex: ".*",
+    };
+    const registry = new FileTypeRegistry();
+    const bus = new EventBus();
+    const resolver = new LazyPairResolver(env.app, () => settings, registry);
+    const middleware = new MetadataCompanionMiddleware(env.app, resolver);
+    middleware.register(bus);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const logFile = env.addFile("logs/broken.log");
+
+    // 1. processFrontMatter throws malformed YAML error during metadata:open-or-create
+    env.app.fileManager.processFrontMatter = vi.fn(async () => {
+      throw new Error("YAMLParseError: unexpected token in frontmatter");
+    });
+
+    Notice.clear();
+    const failedOpen = await bus.emit("metadata:open-or-create", {
+      app: env.app,
+      targetFile: logFile,
+    });
+    expect(failedOpen.companionFile).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    expect(Notice.instances.length).toBeGreaterThanOrEqual(1);
+    expect(Notice.instances[0].message).toContain("YAMLParseError");
+
+    // 2. processFrontMatter throws malformed YAML error during vault rename
+    const renameTarget = env.addFile("logs/service.log");
+    env.addFile("logs/service.md", {
+      "file-support-target": "[[service.log]]",
+    });
+
+    Notice.clear();
+    warnSpy.mockClear();
+    const oldPath = env.renameTargetInVault(
+      renameTarget,
+      "logs/service-renamed.log"
+    );
+
+    await expect(
+      middleware.handleVaultRename(renameTarget, oldPath)
+    ).resolves.toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
+    expect(Notice.instances.length).toBeGreaterThanOrEqual(1);
+    expect(Notice.instances[0].message).toContain("YAMLParseError");
+
+    warnSpy.mockRestore();
+    middleware.destroy();
+  });
+
+  it("prefers freshly written pending frontmatter over stale non-null metadataCache across consecutive renames until metadataCache emits changed", async () => {
+    const env = createInMemoryVaultEnv();
+    const settings: PluginSettings = {
+      ...createDefaultSettings(),
+      enableMetadataFiles: true,
+      metadataDirRegex: ".*",
+    };
+    const registry = new FileTypeRegistry();
+    const bus = new EventBus();
+    const resolver = new LazyPairResolver(env.app, () => settings, registry);
+    const middleware = new MetadataCompanionMiddleware(env.app, resolver);
+    middleware.register(bus);
+
+    // Simulate Obsidian's asynchronous metadataCache:
+    // `cachedFrontmatters` holds the stale cache returned by `getFileCache`, while `env.frontmatters`
+    // holds the actual disk frontmatter written by `processFrontMatter`.
+    const cachedFrontmatters = new Map<string, Record<string, any>>();
+    const logFile = env.addFile("logs/app.log");
+    const companionMd = env.addFile("logs/app.md", {
+      "file-support-target": "[[app.log]]",
+      tags: ["file-metadata"],
+    });
+    cachedFrontmatters.set("logs/app.md", {
+      "file-support-target": "[[app.log]]",
+      tags: ["file-metadata"],
+    });
+
+    env.app.metadataCache.getFileCache = vi.fn((file: TFile) => {
+      if (!file) return null;
+      const norm = normalizePath(file.path);
+      const cached = cachedFrontmatters.get(norm);
+      if (cached) {
+        return { frontmatter: { ...cached } };
+      }
+      // Even after rename, simulate stale non-null cache still returning the old `[[app.log]]` frontmatter!
+      return {
+        frontmatter: {
+          "file-support-target": "[[app.log]]",
+          tags: ["file-metadata"],
+        },
+      };
+    });
+
+    // Rename 1: `logs/app.log` -> `logs/step1.log`
+    const oldPath1 = env.renameTargetInVault(logFile, "logs/step1.log");
+    await middleware.handleVaultRename(logFile, oldPath1);
+
+    expect(companionMd.path).toBe("logs/step1.md");
+    // Even though getFileCache(companionMd) still returns stale `[[app.log]]`,
+    // resolver.getFrontmatter returns the pending `[[step1.log]]`
+    expect(
+      env.app.metadataCache.getFileCache(companionMd).frontmatter[
+        "file-support-target"
+      ]
+    ).toBe("[[app.log]]");
+    expect(resolver.getFrontmatter(companionMd)?.["file-support-target"]).toBe(
+      "[[step1.log]]"
+    );
+
+    // Rename 2 immediately (before metadataCache has re-indexed Rename 1): `logs/step1.log` -> `logs/step2.log`
+    const oldPath2 = env.renameTargetInVault(logFile, "logs/step2.log");
+    await middleware.handleVaultRename(logFile, oldPath2);
+
+    expect(companionMd.path).toBe("logs/step2.md");
+    expect(resolver.getFrontmatter(companionMd)?.["file-support-target"]).toBe(
+      "[[step2.log]]"
+    );
+    expect(resolver.resolve(logFile)?.companionFile).toBe(companionMd);
+
+    // Now simulate Obsidian's metadata indexer catching up and emitting `metadataCache.on("changed")`
+    cachedFrontmatters.set("logs/step2.md", {
+      "file-support-target": "[[step2.log]]",
+      tags: ["file-metadata"],
+      indexedByObsidian: true,
+    });
+    env.app.metadataCache.trigger("changed", companionMd);
+
+    // Pending state is invalidated on "changed", so resolver now reads the newly indexed cache entry
+    expect(resolver.getFrontmatter(companionMd)).toEqual({
+      "file-support-target": "[[step2.log]]",
+      tags: ["file-metadata"],
+      indexedByObsidian: true,
+    });
+
+    middleware.destroy();
   });
 });

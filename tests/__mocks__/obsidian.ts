@@ -753,7 +753,7 @@ export class App {
       const cache = this.metadataCache?.getFileCache?.(file);
       const fm: Record<string, any> =
         cache?.frontmatter && typeof cache.frontmatter === "object"
-          ? cache.frontmatter
+          ? { ...cache.frontmatter }
           : {};
       if (typeof fn === "function") {
         fn(fm);

@@ -11,7 +11,6 @@ import { normalizeExtension } from "../core/FileTypeRegistry";
 import {
   LazyPairResolver,
   getParentDirPath,
-  syncFileObjectPath,
 } from "../metadata/LazyPairResolver";
 import type {
   CompanionPair,
@@ -42,8 +41,23 @@ export class MetadataCompanionMiddleware {
   private resolver: LazyPairResolver;
   private eventBus: EventBus | null = null;
   private unsubscribers: UnsubscribeFn[] = [];
-  private vaultEventRefs: Array<{ name: string; ref: EventRef; fn: (...args: any[]) => any }> = [];
+  private vaultEventRefs: Array<{
+    name: string;
+    ref: EventRef;
+    fn: (...args: any[]) => any;
+  }> = [];
+  private metadataCacheEventRefs: Array<{
+    name: string;
+    ref: EventRef;
+    fn: (...args: any[]) => any;
+  }> = [];
   private inFlightCompanionPaths: Set<string> = new Set();
+  private inFlightOpenOrCreateByTargetPath: Map<
+    string,
+    Promise<TFile | null>
+  > = new Map();
+  private inFlightCreateByCompanionPath: Map<string, Promise<TFile | null>> =
+    new Map();
   private knownCompanionByTargetPath: Map<string, TFile> = new Map();
 
   constructor(app: App, resolver: LazyPairResolver) {
@@ -87,6 +101,7 @@ export class MetadataCompanionMiddleware {
     );
 
     this.registerVaultListeners();
+    this.registerMetadataCacheListeners();
 
     return () => {
       this.destroy();
@@ -110,6 +125,8 @@ export class MetadataCompanionMiddleware {
   /**
    * Open an existing companion `.md` note or create it on demand with YAML frontmatter
    * (`file-support-target: "[[<filename>.<ext>]]"` and default tags), then open it in a leaf.
+   * Reopening an already-linked companion note is idempotent and does not rewrite YAML frontmatter.
+   * Concurrent calls for the same target file share a single in-flight operation.
    */
   async openOrCreateCompanion(
     targetFile: TFile,
@@ -117,89 +134,178 @@ export class MetadataCompanionMiddleware {
     appOverride?: App
   ): Promise<TFile | null> {
     const activeApp = appOverride ?? this.app;
-    if (!this.resolver.isMetadataEnabled()) {
+    if (!targetFile || !this.resolver.isMetadataEnabled()) {
       return null;
     }
     if (!this.resolver.isTargetEligible(targetFile)) {
       return null;
     }
 
-    const pair = this.resolvePair(targetFile);
-    if (!pair) {
-      return null;
+    const normTarget = normalizePath(targetFile.path);
+    const existingInFlight =
+      this.inFlightOpenOrCreateByTargetPath.get(normTarget);
+    if (existingInFlight) {
+      return existingInFlight;
     }
 
-    let companionFile = pair.companionFile;
-    let createdNew = false;
-
-    if (!companionFile) {
-      const existingAtExpected = this.resolver.getTFileByPath(
-        pair.expectedCompanionPath
-      );
-      if (existingAtExpected) {
-        if (
-          this.resolver.doesCompanionLinkToTarget(
-            existingAtExpected,
-            targetFile
-          )
-        ) {
-          companionFile = existingAtExpected;
-        } else {
-          // Both `<basename>.md` and `<basename>.<ext>.md` are already occupied by unrelated notes.
-          // Refuse to overwrite user notes destructively.
-          new Notice(
-            `Cannot create companion note for "${targetFile.name}": "${pair.expectedCompanionPath}" already exists and is not linked to this file.`
-          );
-          return null;
-        }
-      } else {
-        const initialContent = this.resolver.buildInitialCompanionContent(
-          targetFile,
-          pair.expectedCompanionPath
-        );
-        const normExpected = normalizePath(pair.expectedCompanionPath);
-        this.inFlightCompanionPaths.add(normExpected);
-        try {
-          companionFile = await activeApp.vault.create(
-            pair.expectedCompanionPath,
-            initialContent
-          );
-          createdNew = true;
-        } finally {
-          this.inFlightCompanionPaths.delete(normExpected);
-        }
+    const operationPromise = this.performOpenOrCreateCompanion(
+      targetFile,
+      openInNewLeaf,
+      activeApp
+    );
+    this.inFlightOpenOrCreateByTargetPath.set(normTarget, operationPromise);
+    try {
+      return await operationPromise;
+    } finally {
+      if (
+        this.inFlightOpenOrCreateByTargetPath.get(normTarget) ===
+        operationPromise
+      ) {
+        this.inFlightOpenOrCreateByTargetPath.delete(normTarget);
       }
     }
+  }
 
-    if (!companionFile) {
+  private async performOpenOrCreateCompanion(
+    targetFile: TFile,
+    openInNewLeaf: boolean,
+    activeApp: App
+  ): Promise<TFile | null> {
+    try {
+      const primaryCandidatePath = normalizePath(
+        this.resolver.getPrimaryCompanionPath(targetFile)
+      );
+      const pendingPrimaryCreation =
+        this.inFlightCreateByCompanionPath.get(primaryCandidatePath);
+      if (pendingPrimaryCreation) {
+        try {
+          await pendingPrimaryCreation;
+        } catch {
+          // Ignore sibling creation error and re-resolve below
+        }
+      }
+
+      const pair = this.resolvePair(targetFile);
+      if (!pair) {
+        return null;
+      }
+
+      let companionFile = pair.companionFile;
+      let createdNew = false;
+
+      if (!companionFile) {
+        const existingAtExpected = this.resolver.getTFileByPath(
+          pair.expectedCompanionPath
+        );
+        if (existingAtExpected) {
+          if (
+            this.resolver.doesCompanionLinkToTarget(
+              existingAtExpected,
+              targetFile
+            )
+          ) {
+            companionFile = existingAtExpected;
+          } else {
+            // Both `<basename>.md` and `<basename>.<ext>.md` are already occupied by unrelated notes.
+            // Refuse to overwrite user notes destructively.
+            new Notice(
+              `Cannot create companion note for "${targetFile.name}": "${pair.expectedCompanionPath}" already exists and is not linked to this file.`
+            );
+            return null;
+          }
+        } else {
+          const initialContent = this.resolver.buildInitialCompanionContent(
+            targetFile,
+            pair.expectedCompanionPath
+          );
+          const normExpected = normalizePath(pair.expectedCompanionPath);
+          this.inFlightCompanionPaths.add(normExpected);
+
+          const createTask = (async (): Promise<TFile | null> => {
+            const created = await activeApp.vault.create(
+              pair.expectedCompanionPath,
+              initialContent
+            );
+            await this.resolver.writeCompanionFrontmatter(
+              created,
+              targetFile,
+              undefined,
+              undefined,
+              { includeDefaultTags: true }
+            );
+            return created;
+          })();
+
+          this.inFlightCreateByCompanionPath.set(normExpected, createTask);
+          try {
+            companionFile = await createTask;
+            createdNew = true;
+          } finally {
+            this.inFlightCompanionPaths.delete(normExpected);
+            if (
+              this.inFlightCreateByCompanionPath.get(normExpected) ===
+              createTask
+            ) {
+              this.inFlightCreateByCompanionPath.delete(normExpected);
+            }
+          }
+        }
+      }
+
+      if (!companionFile) {
+        return null;
+      }
+
+      // Only write frontmatter on an existing file if its target link is missing or out of date;
+      // never rewrite YAML or re-merge default tags when reopening an already-linked companion note.
+      if (
+        !createdNew &&
+        !this.resolver.doesCompanionLinkToTarget(companionFile, targetFile)
+      ) {
+        await this.resolver.writeCompanionFrontmatter(
+          companionFile,
+          targetFile,
+          undefined,
+          undefined,
+          { includeDefaultTags: false }
+        );
+      }
+
+      this.knownCompanionByTargetPath.set(
+        normalizePath(targetFile.path),
+        companionFile
+      );
+
+      if (
+        createdNew &&
+        this.resolver.getSettingsSnapshot()?.autoRunExtractorOnCreate &&
+        this.eventBus
+      ) {
+        await this.eventBus.emit("metadata:extract", {
+          app: activeApp,
+          targetFile,
+          companionFile,
+          config: this.resolver.getFileTypeConfig(targetFile),
+        });
+      }
+
+      const leaf = activeApp?.workspace?.getLeaf?.(openInNewLeaf);
+      if (leaf && typeof (leaf as any).openFile === "function") {
+        await (leaf as any).openFile(companionFile);
+      }
+
+      return companionFile;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[FileSupport] Failed to open or create companion note for "${targetFile?.path ?? ""}":`,
+        err
+      );
+      new Notice(
+        `Failed to open or create companion metadata note for "${targetFile?.name ?? "file"}": ${message}`
+      );
       return null;
     }
-
-    await this.resolver.writeCompanionFrontmatter(companionFile, targetFile);
-    this.knownCompanionByTargetPath.set(
-      normalizePath(targetFile.path),
-      companionFile
-    );
-
-    if (
-      createdNew &&
-      this.resolver.getSettingsSnapshot()?.autoRunExtractorOnCreate &&
-      this.eventBus
-    ) {
-      await this.eventBus.emit("metadata:extract", {
-        app: activeApp,
-        targetFile,
-        companionFile,
-        config: this.resolver.getFileTypeConfig(targetFile),
-      });
-    }
-
-    const leaf = activeApp?.workspace?.getLeaf?.(openInNewLeaf);
-    if (leaf && typeof (leaf as any).openFile === "function") {
-      await (leaf as any).openFile(companionFile);
-    }
-
-    return companionFile;
   }
 
   /**
@@ -290,6 +396,15 @@ export class MetadataCompanionMiddleware {
               normDesiredCompanion
             );
             effectiveCompanionDir = getParentDirPath(normDesiredCompanion);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn(
+              `[FileSupport] Failed to rename companion metadata note "${normCurrentCompanion}" -> "${normDesiredCompanion}":`,
+              err
+            );
+            new Notice(
+              `Failed to rename companion metadata note "${companionFile.name}": ${message}`
+            );
           } finally {
             this.inFlightCompanionPaths.delete(normCurrentCompanion);
             this.inFlightCompanionPaths.delete(normDesiredCompanion);
@@ -304,13 +419,26 @@ export class MetadataCompanionMiddleware {
       this.knownCompanionByTargetPath.set(normNew, companionFile);
     }
 
-    // Always synchronize the YAML frontmatter `file-support-target` link to the renamed target
-    await this.resolver.writeCompanionFrontmatter(
-      companionFile,
-      file,
-      undefined,
-      effectiveCompanionDir
-    );
+    // Synchronize the YAML frontmatter `file-support-target` link to the renamed target
+    // without re-merging default tags into an existing companion note.
+    try {
+      await this.resolver.writeCompanionFrontmatter(
+        companionFile,
+        file,
+        undefined,
+        effectiveCompanionDir,
+        { includeDefaultTags: false }
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[FileSupport] Failed to update companion frontmatter for "${companionFile.path}":`,
+        err
+      );
+      new Notice(
+        `Failed to update frontmatter in companion note "${companionFile.name}": ${message}`
+      );
+    }
   }
 
   /**
@@ -339,6 +467,8 @@ export class MetadataCompanionMiddleware {
   destroy(): void {
     this.cleanupSubscriptions();
     this.inFlightCompanionPaths.clear();
+    this.inFlightOpenOrCreateByTargetPath.clear();
+    this.inFlightCreateByCompanionPath.clear();
     this.knownCompanionByTargetPath.clear();
     this.eventBus = null;
   }
@@ -371,11 +501,19 @@ export class MetadataCompanionMiddleware {
     }
 
     return (async () => {
-      payload.companionFile = await this.openOrCreateCompanion(
-        payload.targetFile,
-        Boolean(payload.openInNewLeaf),
-        payload.app ?? this.app
-      );
+      try {
+        payload.companionFile = await this.openOrCreateCompanion(
+          payload.targetFile,
+          Boolean(payload.openInNewLeaf),
+          payload.app ?? this.app
+        );
+      } catch (err) {
+        console.warn(
+          "[FileSupport] Unhandled error in metadata:open-or-create middleware:",
+          err
+        );
+        payload.companionFile = null;
+      }
       await next();
     })();
   }
@@ -396,10 +534,14 @@ export class MetadataCompanionMiddleware {
     }
 
     const onRename = (file: TAbstractFile, oldPath: string) => {
-      void this.handleVaultRename(file, oldPath);
+      void this.handleVaultRename(file, oldPath).catch((err) => {
+        console.warn("[FileSupport] Error handling vault rename:", err);
+      });
     };
     const onDelete = (file: TAbstractFile) => {
-      void this.handleVaultDelete(file);
+      void this.handleVaultDelete(file).catch((err) => {
+        console.warn("[FileSupport] Error handling vault delete:", err);
+      });
     };
 
     const renameRef = vault.on("rename", onRename);
@@ -413,6 +555,42 @@ export class MetadataCompanionMiddleware {
     }
   }
 
+  private registerMetadataCacheListeners(): void {
+    const metadataCache = this.app?.metadataCache as any;
+    if (!metadataCache || typeof metadataCache.on !== "function") {
+      return;
+    }
+
+    const onChanged = (file: TAbstractFile) => {
+      if (file && typeof file.path === "string") {
+        this.resolver.invalidatePath(file.path);
+      }
+    };
+    const onDeleted = (file: TAbstractFile) => {
+      if (file && typeof file.path === "string") {
+        this.resolver.invalidatePath(file.path);
+      }
+    };
+
+    const changedRef = metadataCache.on("changed", onChanged);
+    if (changedRef) {
+      this.metadataCacheEventRefs.push({
+        name: "changed",
+        ref: changedRef,
+        fn: onChanged,
+      });
+    }
+
+    const deletedRef = metadataCache.on("deleted", onDeleted);
+    if (deletedRef) {
+      this.metadataCacheEventRefs.push({
+        name: "deleted",
+        ref: deletedRef,
+        fn: onDeleted,
+      });
+    }
+  }
+
   private async renameCompanionFile(
     companionFile: TFile,
     newPath: string
@@ -421,9 +599,6 @@ export class MetadataCompanionMiddleware {
       await this.app.fileManager.renameFile(companionFile, newPath);
     } else if (typeof this.app?.vault?.rename === "function") {
       await this.app.vault.rename(companionFile, newPath);
-    }
-    if (normalizePath(companionFile.path) !== normalizePath(newPath)) {
-      syncFileObjectPath(companionFile, newPath);
     }
   }
 
@@ -446,6 +621,19 @@ export class MetadataCompanionMiddleware {
         }
       } catch {
         // Ignore vault listener cleanup errors
+      }
+    }
+
+    const metadataCache = this.app?.metadataCache as any;
+    for (const entry of this.metadataCacheEventRefs.splice(0)) {
+      try {
+        if (typeof metadataCache?.offref === "function") {
+          metadataCache.offref(entry.ref);
+        } else if (typeof metadataCache?.off === "function") {
+          metadataCache.off(entry.name, entry.fn);
+        }
+      } catch {
+        // Ignore metadataCache listener cleanup errors
       }
     }
   }

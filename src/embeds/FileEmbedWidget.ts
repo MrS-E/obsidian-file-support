@@ -356,11 +356,18 @@ export class FileEmbedWidget extends MarkdownRenderChild {
     if (!file) {
       return;
     }
-    await this.plugin.eventBus.emit("metadata:open-or-create", {
-      app: this.app,
-      targetFile: file,
-      openInNewLeaf: false,
-    });
+    try {
+      await this.plugin.eventBus.emit("metadata:open-or-create", {
+        app: this.app,
+        targetFile: file,
+        openInNewLeaf: false,
+      });
+    } catch (err) {
+      console.warn(
+        `[FileSupport] Failed to open or create companion metadata for "${file.path}":`,
+        err
+      );
+    }
   }
 
   private ensureConfigSubscription(): void {

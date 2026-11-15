@@ -3,12 +3,44 @@ import {
   FileTypeRegistry,
   normalizeExtension,
 } from "../core/FileTypeRegistry";
-import { validateDirectoryRegex } from "../settings/PluginSettings";
+import {
+  type RegexValidationResult,
+  validateDirectoryRegex,
+} from "../settings/PluginSettings";
 import type {
   CompanionPair,
   FileTypeConfig,
   PluginSettings,
 } from "../types/contracts";
+
+interface PendingFrontmatterEntry {
+  frontmatter: Record<string, any>;
+  cacheSnapshotAtWrite: string | null;
+  syncedWithCacheAtWrite: boolean;
+}
+
+export interface WriteCompanionFrontmatterOptions {
+  /**
+   * Whether to merge `settings.metadataDefaultTags` into `tags`.
+   * Should be `true` when initializing a new companion note, and `false` when
+   * updating the target link on an already-linked companion note so user-removed
+   * default tags are never re-added.
+   */
+  includeDefaultTags?: boolean;
+}
+
+function serializeFrontmatterSnapshot(
+  fm: Record<string, any> | null | undefined
+): string | null {
+  if (!fm || typeof fm !== "object") {
+    return null;
+  }
+  try {
+    return JSON.stringify(fm);
+  } catch {
+    return null;
+  }
+}
 
 export interface SplitPathParts {
   path: string;
@@ -319,18 +351,6 @@ export function buildInitialCompanionMarkdown(
 }
 
 /**
- * Update the Path/Name/Basename/Extension properties on a TFile-like object in place
- * if the underlying mock environment did not mutate the TFile during rename.
- */
-export function syncFileObjectPath(file: TFile, newPath: string): void {
-  const parts = splitFilePath(newPath);
-  file.path = parts.path;
-  file.name = parts.name;
-  file.basename = parts.basename;
-  file.extension = parts.extension;
-}
-
-/**
  * Lazily resolves `<target> <-> <companion.md>` pairs on demand without vault-wide startup scans.
  * Evaluates `enableMetadataFiles`, `metadataDirRegex`, and YAML frontmatter target links,
  * falling back from `<basename>.md` to `<basename>.<ext>.md` on same-folder collision.
@@ -339,8 +359,10 @@ export class LazyPairResolver {
   private app: App;
   private getSettings: () => PluginSettings;
   private registry?: FileTypeRegistry;
-  private pendingFrontmatterByPath: Map<string, Record<string, any>> =
+  private pendingFrontmatterByPath: Map<string, PendingFrontmatterEntry> =
     new Map();
+  private cachedRegexPattern: string | null = null;
+  private cachedRegexValidation: RegexValidationResult | null = null;
 
   constructor(
     app: App,
@@ -410,7 +432,12 @@ export class LazyPairResolver {
       return false;
     }
 
-    const validation = validateDirectoryRegex(pattern);
+    if (this.cachedRegexPattern !== pattern || !this.cachedRegexValidation) {
+      this.cachedRegexPattern = pattern;
+      this.cachedRegexValidation = validateDirectoryRegex(pattern);
+    }
+
+    const validation = this.cachedRegexValidation;
     if (!validation.valid || !validation.regex) {
       return false;
     }
@@ -526,22 +553,34 @@ export class LazyPairResolver {
   }
 
   /**
-   * Read the frontmatter object for a `.md` file from `app.metadataCache.getFileCache(file)`,
-   * falling back to pending in-memory frontmatter only if `getFileCache(file)` returned null/undefined
-   * (e.g. immediately after file creation before Obsidian's metadata indexer has run).
+   * Read the frontmatter object for a `.md` file from pending freshly-written frontmatter
+   * (until `metadataCache` finishes indexing and emits `changed`) or from
+   * `app.metadataCache.getFileCache(file)`.
    */
   getFrontmatter(file: TFile): Record<string, any> | null {
     if (!file) {
       return null;
     }
+    const normPath = normalizePath(file.path);
+    const pending = this.pendingFrontmatterByPath.get(normPath);
     const cache = this.app?.metadataCache?.getFileCache?.(file);
-    if (cache !== null && cache !== undefined) {
-      if (cache.frontmatter && typeof cache.frontmatter === "object") {
-        return cache.frontmatter;
+    const cacheFm =
+      cache?.frontmatter && typeof cache.frontmatter === "object"
+        ? cache.frontmatter
+        : null;
+
+    if (pending) {
+      if (pending.syncedWithCacheAtWrite) {
+        const currentSnapshot = serializeFrontmatterSnapshot(cacheFm);
+        if (currentSnapshot !== pending.cacheSnapshotAtWrite) {
+          this.pendingFrontmatterByPath.delete(normPath);
+          return cacheFm;
+        }
       }
-      return null;
+      return pending.frontmatter;
     }
-    return this.pendingFrontmatterByPath.get(normalizePath(file.path)) ?? null;
+
+    return cacheFm;
   }
 
   /**
@@ -782,13 +821,14 @@ export class LazyPairResolver {
   /**
    * Non-destructively read/update YAML frontmatter on `companionFile` using
    * `app.fileManager.processFrontMatter`, writing `file-support-target: "[[<filename>.<ext>]]"`
-   * and merging `metadataDefaultTags` without overwriting existing user properties or tags.
+   * and merging `metadataDefaultTags` on initial creation without overwriting existing user properties or tags.
    */
   async writeCompanionFrontmatter(
     companionFile: TFile,
     targetFileOrPath: TFile | string,
     extraProps?: Record<string, unknown>,
-    companionDirOverride?: string
+    companionDirOverride?: string,
+    options?: WriteCompanionFrontmatterOptions
   ): Promise<Record<string, any>> {
     const settings = this.getSettings();
     const key =
@@ -801,15 +841,30 @@ export class LazyPairResolver {
     const linkValue = formatTargetWikiLink(targetFileOrPath, companionDir);
 
     const normalizedCompanionPath = normalizePath(companionFile.path);
+    const existingPending = this.pendingFrontmatterByPath.get(
+      normalizedCompanionPath
+    )?.frontmatter;
     const existingSnapshot =
-      this.getFrontmatter(companionFile) ??
-      this.pendingFrontmatterByPath.get(normalizedCompanionPath) ??
-      {};
+      this.getFrontmatter(companionFile) ?? existingPending ?? {};
     let finalFrontmatter: Record<string, any> = { ...existingSnapshot };
     let callbackInvoked = false;
 
     const applyMutations = (fm: Record<string, any>) => {
       callbackInvoked = true;
+      if (existingPending && typeof existingPending === "object") {
+        for (const [pendKey, pendVal] of Object.entries(existingPending)) {
+          if (fm[pendKey] === undefined) {
+            fm[pendKey] = pendVal;
+          }
+        }
+      }
+
+      const hadExistingTargetLink = fm[key] !== undefined;
+      const shouldIncludeDefaultTags =
+        options?.includeDefaultTags !== undefined
+          ? options.includeDefaultTags
+          : !hadExistingTargetLink;
+
       if (extraProps && typeof extraProps === "object") {
         for (const [propKey, propVal] of Object.entries(extraProps)) {
           if (propKey === key || propKey === "tags") {
@@ -820,20 +875,27 @@ export class LazyPairResolver {
       }
       fm[key] = linkValue;
 
-      const existingTagsSource =
-        fm.tags !== undefined ? fm.tags : fm.tag !== undefined ? fm.tag : [];
       const extraTags =
         extraProps && Array.isArray(extraProps.tags)
           ? (extraProps.tags as string[])
           : [];
-      const mergedTags = mergeFrontmatterTags(existingTagsSource, [
-        ...defaultTags,
+      const tagsToMerge = [
+        ...(shouldIncludeDefaultTags ? defaultTags : []),
         ...extraTags,
-      ]);
-      if (mergedTags.length > 0 || fm.tags !== undefined) {
-        fm.tags = mergedTags;
-        if (fm.tag !== undefined) {
-          delete fm.tag;
+      ];
+
+      if (tagsToMerge.length > 0) {
+        const existingTagsSource =
+          fm.tags !== undefined ? fm.tags : fm.tag !== undefined ? fm.tag : [];
+        const mergedTags = mergeFrontmatterTags(
+          existingTagsSource,
+          tagsToMerge
+        );
+        if (mergedTags.length > 0 || fm.tags !== undefined) {
+          fm.tags = mergedTags;
+          if (fm.tag !== undefined) {
+            delete fm.tag;
+          }
         }
       }
       finalFrontmatter = { ...fm };
@@ -850,10 +912,22 @@ export class LazyPairResolver {
       applyMutations(finalFrontmatter);
     }
 
-    this.pendingFrontmatterByPath.set(
-      normalizePath(companionFile.path),
-      finalFrontmatter
-    );
+    const normAfterPath = normalizePath(companionFile.path);
+    const cacheAfter = this.app?.metadataCache?.getFileCache?.(companionFile);
+    const cacheFmAfter =
+      cacheAfter?.frontmatter && typeof cacheAfter.frontmatter === "object"
+        ? cacheAfter.frontmatter
+        : null;
+    const cacheSnapshotAtWrite = serializeFrontmatterSnapshot(cacheFmAfter);
+    const finalSnapshot = serializeFrontmatterSnapshot(finalFrontmatter);
+    const syncedWithCacheAtWrite =
+      cacheSnapshotAtWrite !== null && cacheSnapshotAtWrite === finalSnapshot;
+
+    this.pendingFrontmatterByPath.set(normAfterPath, {
+      frontmatter: finalFrontmatter,
+      cacheSnapshotAtWrite,
+      syncedWithCacheAtWrite,
+    });
     return finalFrontmatter;
   }
 
