@@ -456,9 +456,46 @@ describe("Structured Managed Markdown Section Updater", () => {
     },
     {
       name: "keeps an extracted unclosed fence inside its managed block",
-      existingMarkdown: "Manual note\r\n",
+      existingMarkdown: [
+        EXTRACTED_SECTION_START_MARKER,
+        "Old extraction",
+        EXTRACTED_SECTION_END_MARKER,
+        "",
+        "Manual note after the block",
+        "",
+      ].join("\r\n"),
       extractedBody: "```typescript\r\nconst useful = true;\r\n",
-      expectedBody: "```typescript\r\nconst useful = true;",
+      expectedBody: "```typescript\r\nconst useful = true;\r\n```",
+      preservedText: "Manual note after the block",
+      expectedClosingText: "",
+      preservedSuffix: [
+        EXTRACTED_SECTION_END_MARKER,
+        "",
+        "Manual note after the block",
+        "",
+      ].join("\r\n"),
+    },
+    {
+      name: "neutralizes a start marker preceded by a lone carriage return",
+      existingMarkdown: "Manual note\r\n",
+      extractedBody: `Before\r${EXTRACTED_SECTION_START_MARKER}\rAfter`,
+      expectedBody: [
+        "Before",
+        EXTRACTED_SECTION_START_MARKER.replace("<!--", "&lt;!--"),
+        "After",
+      ].join("\r\n"),
+      preservedText: "Manual note",
+      expectedClosingText: "",
+    },
+    {
+      name: "neutralizes an end marker preceded by a lone carriage return",
+      existingMarkdown: "Manual note\r\n",
+      extractedBody: `Before\r${EXTRACTED_SECTION_END_MARKER}\rAfter`,
+      expectedBody: [
+        "Before",
+        EXTRACTED_SECTION_END_MARKER.replace("<!--", "&lt;!--"),
+        "After",
+      ].join("\r\n"),
       preservedText: "Manual note",
       expectedClosingText: "",
     },
@@ -476,6 +513,7 @@ describe("Structured Managed Markdown Section Updater", () => {
         EXTRACTED_SECTION_START_MARKER.replace("<!--", "&lt;!--"),
         "Useful extracted text",
         EXTRACTED_SECTION_END_MARKER.replace("<!--", "&lt;!--"),
+        "~~~",
       ].join("\r\n"),
       preservedText: "Manual note",
       expectedClosingText: "",
@@ -486,6 +524,7 @@ describe("Structured Managed Markdown Section Updater", () => {
     expectedBody,
     preservedText,
     expectedClosingText,
+    preservedSuffix,
   }) => {
     let updated = existingMarkdown;
 
@@ -498,6 +537,10 @@ describe("Structured Managed Markdown Section Updater", () => {
       expect(readExtractedMarkdownSection(updated)).toBe(expectedBody);
       expect(updated).toContain(preservedText);
       expect(updated.replace(/\r\n/g, "").includes("\n")).toBe(false);
+
+      if (preservedSuffix) {
+        expect(updated.endsWith(preservedSuffix)).toBe(true);
+      }
 
       if (expectedClosingText) {
         expect(updated).toContain(

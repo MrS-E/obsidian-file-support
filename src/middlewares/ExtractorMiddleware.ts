@@ -198,8 +198,8 @@ export function formatExtractedMarkdownBlock(
   extractedBody: string,
   eol: "\r\n" | "\n" = "\n"
 ): string {
-  const normalized = (extractedBody ?? "")
-    .replace(/\r\n/g, "\n")
+  const normalizedLines = (extractedBody ?? "")
+    .replace(/\r\n?/g, "\n")
     .replace(/\n+$/, "")
     .split("\n")
     .map((line) => {
@@ -210,13 +210,21 @@ export function formatExtractedMarkdownBlock(
         return line.replace("<!--", "&lt;!--");
       }
       return line;
-    })
-    .join("\n")
-    .replace(/\n/g, eol);
+    });
+  const normalizedBody = normalizedLines.join("\n");
+  const normalized = normalizedBody.replace(/\n/g, eol);
   if (normalized.length === 0) {
     return `${EXTRACTED_SECTION_START_MARKER}${eol}${EXTRACTED_SECTION_END_MARKER}`;
   }
-  return `${EXTRACTED_SECTION_START_MARKER}${eol}${normalized}${eol}${EXTRACTED_SECTION_END_MARKER}`;
+  const { unclosedFence } = scanMarkdownBodyLines(normalizedBody);
+  const bodyWithClosedFence = unclosedFence
+    ? `${normalized}${eol}${unclosedFence.char.repeat(unclosedFence.length)}`
+    : normalized;
+  return [
+    EXTRACTED_SECTION_START_MARKER,
+    bodyWithClosedFence,
+    EXTRACTED_SECTION_END_MARKER,
+  ].join(eol);
 }
 
 /**
