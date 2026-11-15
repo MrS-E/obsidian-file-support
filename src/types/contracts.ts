@@ -129,6 +129,7 @@ export interface RendererInstance {
   setValue(data: string): void;
   setMode(mode: EditMode): void;
   getMode(): EditMode;
+  flushSave?(): Promise<void>;
   focus?(): void;
   destroy(): void;
 }

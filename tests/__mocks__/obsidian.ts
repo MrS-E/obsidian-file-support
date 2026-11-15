@@ -1,3 +1,116 @@
+import { StateEffect, StateField } from "@codemirror/state";
+
+if (typeof Range !== "undefined") {
+  if (typeof Range.prototype.getClientRects !== "function") {
+    Range.prototype.getClientRects = () =>
+      ({
+        length: 0,
+        item: () => null,
+        [Symbol.iterator]: function* () {},
+      }) as unknown as DOMRectList;
+  }
+  if (typeof Range.prototype.getBoundingClientRect !== "function") {
+    Range.prototype.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  }
+}
+
+export interface EventRef {
+  name: string;
+  callback: (...data: any[]) => any;
+  ctx?: any;
+}
+
+export class Events {
+  private _events: Map<string, EventRef[]> = new Map();
+
+  on(name: string, callback: (...data: any[]) => any, ctx?: any): EventRef {
+    const ref: EventRef = { name, callback, ctx };
+    const list = this._events.get(name) ?? [];
+    list.push(ref);
+    this._events.set(name, list);
+    return ref;
+  }
+
+  off(name: string, callback: (...data: any[]) => any): void {
+    const list = this._events.get(name);
+    if (!list) return;
+    const filtered = list.filter((r) => r.callback !== callback);
+    if (filtered.length === 0) {
+      this._events.delete(name);
+    } else {
+      this._events.set(name, filtered);
+    }
+  }
+
+  offref(ref: EventRef): void {
+    if (!ref || !ref.name) return;
+    const list = this._events.get(ref.name);
+    if (!list) return;
+    const filtered = list.filter((r) => r !== ref);
+    if (filtered.length === 0) {
+      this._events.delete(ref.name);
+    } else {
+      this._events.set(ref.name, filtered);
+    }
+  }
+
+  trigger(name: string, ...data: any[]): void {
+    const list = this._events.get(name);
+    if (!list) return;
+    for (const ref of [...list]) {
+      ref.callback.apply(ref.ctx, data);
+    }
+  }
+
+  listenerCount(name: string): number {
+    return this._events.get(name)?.length ?? 0;
+  }
+}
+
+export const setLivePreviewEffect = StateEffect.define<boolean>();
+export const setEditorInfoEffect = StateEffect.define<any>();
+
+export const editorLivePreviewField = StateField.define<boolean>({
+  create: () => true,
+  update: (value, tr) => {
+    for (const effect of tr.effects) {
+      if (effect.is(setLivePreviewEffect)) {
+        return effect.value;
+      }
+    }
+    return value;
+  },
+});
+
+export const editorInfoField = StateField.define<any>({
+  create: () => null,
+  update: (value, tr) => {
+    for (const effect of tr.effects) {
+      if (effect.is(setEditorInfoEffect)) {
+        return effect.value;
+      }
+    }
+    return value;
+  },
+});
+
+export const editorViewField = editorInfoField;
+export const editorEditorField = StateField.define<any>({
+  create: () => null,
+  update: (value) => value,
+});
+
 export class TAbstractFile {
   path: string;
   name: string;
@@ -586,30 +699,40 @@ export class Notice {
   }
 }
 
+function createEventEmitterTarget<T extends Record<string, any>>(
+  target: T
+): T & Pick<Events, "on" | "off" | "offref" | "trigger" | "listenerCount"> {
+  const events = new Events();
+  return Object.assign(target, {
+    on: events.on.bind(events),
+    off: events.off.bind(events),
+    offref: events.offref.bind(events),
+    trigger: events.trigger.bind(events),
+    listenerCount: events.listenerCount.bind(events),
+  });
+}
+
 export class App {
-  vault: any = {
+  vault: any = createEventEmitterTarget({
     getAbstractFileByPath: (_path: string) => null,
     read: async (_file: TFile) => "",
     modify: async (_file: TFile, _data: string) => {},
     create: async (path: string, _data: string) => new TFile(path),
     rename: async (_file: TAbstractFile, _newPath: string) => {},
-    on: () => ({}),
-  };
-  metadataCache: any = {
+  });
+  metadataCache: any = createEventEmitterTarget({
     getFileCache: (_file: TFile) => null,
     getFirstLinkpathDest: (_linkpath: string, _sourcePath: string) => null,
-    on: () => ({}),
-  };
+  });
   fileManager: any = {
     processFrontMatter: async (_file: TFile, _fn: (fm: Record<string, any>) => void) => {},
     renameFile: async (_file: TAbstractFile, _newPath: string) => {},
   };
-  workspace: any = {
+  workspace: any = createEventEmitterTarget({
     getLeavesOfType: (_type: string) => [],
     getLeaf: (_newLeaf?: boolean) => new WorkspaceLeaf(),
-    on: () => ({}),
     onLayoutReady: (cb: () => void) => cb(),
-  };
+  });
 }
 
 export function normalizePath(path: string): string {

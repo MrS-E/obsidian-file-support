@@ -1,4 +1,4 @@
-import type { App, TFile } from "obsidian";
+import type { App, EventRef, TAbstractFile, TFile } from "obsidian";
 import type { EventBus, UnsubscribeFn } from "../core/EventBus";
 import {
   DEFAULT_TEXT_RENDERER_ID,
@@ -6,6 +6,7 @@ import {
 } from "../renderers/RendererRegistry";
 import type {
   ConfigUpdatedEventPayload,
+  EditMode,
   FileEmbedEventPayload,
   FileOpenEventPayload,
   FileTypeConfig,
@@ -14,6 +15,12 @@ import type {
 } from "../types/contracts";
 
 export type { RendererMiddleware } from "../types/contracts";
+
+export const DEFAULT_EMBED_SAVE_DEBOUNCE_MS = 150;
+
+export interface TextCodeRendererMiddlewareOptions {
+  embedSaveDebounceMs?: number;
+}
 
 /**
  * Helper to wire any RendererMiddleware (text/code CM6, WASM viewer, binary inspector, etc.)
@@ -64,6 +71,23 @@ async function readVaultFileContent(app: App, file: TFile): Promise<string> {
   return "";
 }
 
+async function readVaultFileFreshContent(
+  app: App,
+  file: TFile
+): Promise<string> {
+  const vault = app?.vault as any;
+  if (!vault) {
+    return "";
+  }
+  if (typeof vault.read === "function") {
+    return await vault.read(file);
+  }
+  if (typeof vault.cachedRead === "function") {
+    return await vault.cachedRead(file);
+  }
+  return "";
+}
+
 /**
  * Default renderer middleware handling text and source code files via CodeMirror 6
  * (and any additional adapters registered in RendererRegistry).
@@ -71,11 +95,20 @@ async function readVaultFileContent(app: App, file: TFile): Promise<string> {
 export class TextCodeRendererMiddleware implements RendererMiddleware {
   readonly id: string = DEFAULT_TEXT_RENDERER_ID;
   private readonly rendererRegistry: RendererRegistry;
+  private readonly embedSaveDebounceMs: number;
   private readonly activeInstances: Set<RendererInstance> = new Set();
   private unsubscribeBus: UnsubscribeFn | null = null;
 
-  constructor(rendererRegistry?: RendererRegistry) {
+  constructor(
+    rendererRegistry?: RendererRegistry,
+    options?: TextCodeRendererMiddlewareOptions
+  ) {
     this.rendererRegistry = rendererRegistry ?? new RendererRegistry();
+    this.embedSaveDebounceMs =
+      typeof options?.embedSaveDebounceMs === "number" &&
+      options.embedSaveDebounceMs >= 0
+        ? options.embedSaveDebounceMs
+        : DEFAULT_EMBED_SAVE_DEBOUNCE_MS;
   }
 
   getRegistry(): RendererRegistry {
@@ -154,19 +187,232 @@ export class TextCodeRendererMiddleware implements RendererMiddleware {
       );
     }
 
+    const hasSubpath = Boolean(
+      payload.subpath && payload.subpath.trim().length > 0
+    );
+    const effectiveInitialMode: EditMode = hasSubpath
+      ? "readonly"
+      : payload.mode;
+
     const mountWithData = (
       initialData: string
     ): Promise<RendererInstance> | RendererInstance => {
       let currentInstance: RendererInstance | null = null;
+      let destroyed = false;
+      let lastSyncedData = initialData;
+      let debouncingData: string | null = null;
+      let queuedData: string | null = null;
+      let activeWriteData: string | null = null;
+      let isDirty = false;
+      let localEditVersion = 0;
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+      let inFlightPromise: Promise<void> | null = null;
+      let vaultModifyRef: EventRef | null = null;
+
+      const hasPendingLocalChanges = (): boolean => {
+        return (
+          isDirty ||
+          debouncingData !== null ||
+          queuedData !== null ||
+          activeWriteData !== null ||
+          inFlightPromise !== null
+        );
+      };
+
+      const runSaveLoop = (): Promise<void> => {
+        if (inFlightPromise) {
+          return inFlightPromise;
+        }
+        inFlightPromise = (async () => {
+          try {
+            while (queuedData !== null) {
+              const dataToWrite = queuedData;
+              queuedData = null;
+
+              if (dataToWrite === lastSyncedData) {
+                if (debouncingData === null && queuedData === null) {
+                  isDirty = false;
+                }
+                continue;
+              }
+
+              activeWriteData = dataToWrite;
+              try {
+                if (typeof payload.app?.vault?.modify === "function") {
+                  await payload.app.vault.modify(payload.file, dataToWrite);
+                }
+                lastSyncedData = dataToWrite;
+              } finally {
+                activeWriteData = null;
+              }
+
+              if (debouncingData === null && queuedData === null) {
+                isDirty = false;
+              }
+            }
+          } catch (err) {
+            console.error(
+              `[obsidian-file-support] Failed to persist editable embed changes for "${payload.file.path}":`,
+              err
+            );
+          } finally {
+            inFlightPromise = null;
+          }
+        })();
+        return inFlightPromise;
+      };
+
+      const flushPendingSave = (): Promise<void> => {
+        if (debounceTimer !== null) {
+          clearTimeout(debounceTimer);
+          debounceTimer = null;
+        }
+        if (debouncingData !== null) {
+          queuedData = debouncingData;
+          debouncingData = null;
+        }
+        if (queuedData !== null || inFlightPromise !== null) {
+          return runSaveLoop();
+        }
+        isDirty = false;
+        return Promise.resolve();
+      };
+
       const onContentChange = (newData: string) => {
         if (
-          currentInstance &&
-          currentInstance.getMode() === "editable" &&
-          !payload.subpath &&
-          typeof payload.app?.vault?.modify === "function"
+          destroyed ||
+          hasSubpath ||
+          !currentInstance ||
+          currentInstance.getMode() !== "editable"
         ) {
-          void payload.app.vault.modify(payload.file, newData);
+          return;
         }
+        localEditVersion++;
+        debouncingData = newData;
+        isDirty = true;
+        if (debounceTimer !== null) {
+          clearTimeout(debounceTimer);
+        }
+        debounceTimer = setTimeout(() => {
+          debounceTimer = null;
+          if (debouncingData !== null) {
+            queuedData = debouncingData;
+            debouncingData = null;
+            void runSaveLoop();
+          }
+        }, this.embedSaveDebounceMs);
+      };
+
+      const onVaultModify = (modifiedFile: TAbstractFile) => {
+        if (destroyed || !currentInstance || !modifiedFile) {
+          return;
+        }
+        if (
+          modifiedFile !== payload.file &&
+          modifiedFile.path !== payload.file.path
+        ) {
+          return;
+        }
+        // Conflict-aware: never clobber pending dirty local edits or in-flight saves
+        if (hasPendingLocalChanges()) {
+          return;
+        }
+        const editVersionBeforeRead = localEditVersion;
+        void readVaultFileFreshContent(payload.app, payload.file).then(
+          (diskContent) => {
+            if (
+              destroyed ||
+              !currentInstance ||
+              hasPendingLocalChanges() ||
+              localEditVersion !== editVersionBeforeRead
+            ) {
+              return;
+            }
+            if (
+              !hasSubpath &&
+              currentInstance.getValue() !== lastSyncedData
+            ) {
+              // Editor value diverged locally since last sync; do not overwrite
+              return;
+            }
+            if (diskContent === lastSyncedData) {
+              return;
+            }
+            lastSyncedData = diskContent;
+            currentInstance.setValue(diskContent);
+          }
+        );
+      };
+
+      const attachEmbedLifecycle = (
+        inst: RendererInstance
+      ): RendererInstance => {
+        currentInstance = inst;
+        if (hasSubpath && inst.getMode() !== "readonly") {
+          inst.setMode("readonly");
+        }
+
+        const vault = payload.app?.vault as any;
+        if (vault && typeof vault.on === "function") {
+          vaultModifyRef = vault.on("modify", onVaultModify);
+        }
+
+        const cleanupVaultSubscription = () => {
+          if (!vault) {
+            return;
+          }
+          if (vaultModifyRef && typeof vault.offref === "function") {
+            try {
+              vault.offref(vaultModifyRef);
+            } catch {
+              // Ignore cleanup errors
+            }
+          } else if (typeof vault.off === "function") {
+            try {
+              vault.off("modify", onVaultModify);
+            } catch {
+              // Ignore cleanup errors
+            }
+          }
+          vaultModifyRef = null;
+        };
+
+        const originalSetMode = inst.setMode.bind(inst);
+        inst.setMode = (nextMode: EditMode) => {
+          const effectiveNextMode: EditMode = hasSubpath
+            ? "readonly"
+            : nextMode;
+          if (
+            inst.getMode() === "editable" &&
+            effectiveNextMode !== "editable" &&
+            (isDirty || debouncingData !== null || queuedData !== null)
+          ) {
+            void flushPendingSave();
+          }
+          originalSetMode(effectiveNextMode);
+        };
+
+        inst.flushSave = () => flushPendingSave();
+
+        const tracked = this.trackInstance(inst, payload);
+        const originalDestroy = tracked.destroy.bind(tracked);
+        tracked.destroy = () => {
+          if (destroyed) {
+            return;
+          }
+          if (isDirty || debouncingData !== null || queuedData !== null) {
+            void flushPendingSave();
+          }
+          destroyed = true;
+          if (debounceTimer !== null) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+          }
+          cleanupVaultSubscription();
+          originalDestroy();
+        };
+
+        return tracked;
       };
 
       const mounted = adapter.mount({
@@ -174,7 +420,7 @@ export class TextCodeRendererMiddleware implements RendererMiddleware {
         file: payload.file,
         config: payload.config,
         containerEl: payload.containerEl,
-        mode: payload.mode,
+        mode: effectiveInitialMode,
         isEmbed: true,
         initialData,
         subpath: payload.subpath,
@@ -184,13 +430,9 @@ export class TextCodeRendererMiddleware implements RendererMiddleware {
       });
 
       if (mounted instanceof Promise) {
-        return mounted.then((inst) => {
-          currentInstance = inst;
-          return this.trackInstance(inst, payload);
-        });
+        return mounted.then((inst) => attachEmbedLifecycle(inst));
       }
-      currentInstance = mounted;
-      return this.trackInstance(mounted, payload);
+      return attachEmbedLifecycle(mounted);
     };
 
     if (typeof payload.data === "string") {

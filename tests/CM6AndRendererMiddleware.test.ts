@@ -132,14 +132,20 @@ describe("CM6EditorFactory, LanguageSupportMap, and TextCodeRendererMiddleware",
     const embedEditor = CM6EditorFactory.createEditor({
       containerEl,
       initialData: content,
-      mode: "readonly",
+      mode: "editable",
       languageId: "c",
       extension: "c",
       isEmbed: true,
       subpath: "#L2-L4",
     });
 
+    // Subpath embeds are always forced to readonly even if mode: 'editable' was requested
+    expect(embedEditor.getMode()).toBe("readonly");
+    expect(embedEditor.isReadOnly()).toBe(true);
     expect(embedEditor.getValue()).toBe("beta\ngamma\ndelta");
+    embedEditor.setMode("editable");
+    expect(embedEditor.getMode()).toBe("readonly");
+    expect(embedEditor.isReadOnly()).toBe(true);
     embedEditor.destroy();
   });
 

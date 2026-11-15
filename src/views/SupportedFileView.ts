@@ -74,6 +74,7 @@ export class SupportedFileView extends TextFileView {
   private mountedFilePath: string | null = null;
   private mountGeneration: number = 0;
   private isDirty: boolean = false;
+  private lastSavedData: string = "";
   private initialized: boolean = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: FileSupportViewHost) {
@@ -132,12 +133,17 @@ export class SupportedFileView extends TextFileView {
         ? await this.app.vault.read(file)
         : (this.data ?? "");
     this.data = content;
+    this.lastSavedData = content;
     this.isDirty = false;
     await this.mountEditor(file, content);
   }
 
   async onUnloadFile(file: TFile): Promise<void> {
-    if (this.isDirty && this.getMode() === "editable" && this.file) {
+    if (
+      (this.isDirty || this.getViewData() !== this.lastSavedData) &&
+      this.getMode() === "editable" &&
+      this.file
+    ) {
       await this.save(false);
     }
     this.destroyRenderer();
@@ -160,6 +166,9 @@ export class SupportedFileView extends TextFileView {
 
   setViewData(data: string, clear: boolean): void {
     this.data = data ?? "";
+    if (clear || !this.isDirty) {
+      this.lastSavedData = this.data;
+    }
     this.ensureInitialized();
     if (!this.file) {
       return;
@@ -177,6 +186,7 @@ export class SupportedFileView extends TextFileView {
 
   clear(): void {
     this.data = "";
+    this.lastSavedData = "";
     this.isDirty = false;
     this.destroyRenderer();
     this.mountedFilePath = null;
@@ -195,9 +205,13 @@ export class SupportedFileView extends TextFileView {
     }
     const currentData = this.getViewData();
     this.data = currentData;
+    const hasChanges = this.isDirty || currentData !== this.lastSavedData;
     this.isDirty = false;
-    if (typeof this.app?.vault?.modify === "function") {
-      await this.app.vault.modify(this.file, currentData);
+    if (hasChanges) {
+      this.lastSavedData = currentData;
+      if (typeof this.app?.vault?.modify === "function") {
+        await this.app.vault.modify(this.file, currentData);
+      }
     }
     if (clear) {
       this.clear();
@@ -258,9 +272,7 @@ export class SupportedFileView extends TextFileView {
     if (!this.unsubscribeConfig) {
       this.unsubscribeConfig = this.plugin.eventBus.on(
         "config:updated",
-        (payload) => {
-          this.handleConfigUpdated(payload);
-        }
+        (payload) => this.handleConfigUpdated(payload)
       );
       if (typeof (this as any).register === "function") {
         (this as any).register(() => this.cleanupConfigSubscription());
@@ -368,11 +380,15 @@ export class SupportedFileView extends TextFileView {
       return;
     }
     this.data = newData;
-    this.isDirty = true;
-    this.requestSave();
+    this.isDirty = newData !== this.lastSavedData;
+    if (this.isDirty) {
+      this.requestSave();
+    }
   }
 
-  private handleConfigUpdated(payload: ConfigUpdatedEventPayload): void {
+  private async handleConfigUpdated(
+    payload: ConfigUpdatedEventPayload
+  ): Promise<void> {
     this.updateMetadataActionVisibility();
 
     if (!this.file) {
@@ -395,14 +411,31 @@ export class SupportedFileView extends TextFileView {
         ? updatedConfig.tabMode
         : "readonly";
 
-    if (this.currentMode === nextMode && this.rendererInstance?.getMode() === nextMode) {
+    if (
+      this.currentMode === nextMode &&
+      this.rendererInstance?.getMode() === nextMode
+    ) {
       return;
+    }
+
+    // Flush any pending dirty edits while still editable before switching to readonly
+    let flushPromise: Promise<void> | null = null;
+    if (
+      this.getMode() === "editable" &&
+      nextMode !== "editable" &&
+      (this.isDirty || this.getViewData() !== this.lastSavedData)
+    ) {
+      flushPromise = this.save(false);
     }
 
     this.currentMode = nextMode;
     this.contentEl?.setAttribute?.("data-edit-mode", nextMode);
     this.editorHostEl?.setAttribute?.("data-edit-mode", nextMode);
     this.rendererInstance?.setMode(nextMode);
+
+    if (flushPromise) {
+      await flushPromise;
+    }
   }
 
   private destroyRenderer(): void {

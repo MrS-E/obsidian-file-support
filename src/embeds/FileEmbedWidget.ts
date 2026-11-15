@@ -15,6 +15,8 @@ import {
   MarkdownPostProcessorContext,
   MarkdownRenderChild,
   TFile,
+  editorInfoField,
+  editorLivePreviewField,
   normalizePath,
   setIcon,
 } from "obsidian";
@@ -326,6 +328,10 @@ export class FileEmbedWidget extends MarkdownRenderChild {
     return this.rendererInstance;
   }
 
+  flushSave(): Promise<void> {
+    return this.rendererInstance?.flushSave?.() ?? Promise.resolve();
+  }
+
   getOpenFileButton(): HTMLElement | null {
     return this.openFileBtnEl;
   }
@@ -363,9 +369,7 @@ export class FileEmbedWidget extends MarkdownRenderChild {
     }
     this.unsubscribeConfig = this.plugin.eventBus.on(
       "config:updated",
-      (payload) => {
-        this.handleConfigUpdated(payload);
-      }
+      (payload) => this.handleConfigUpdated(payload)
     );
   }
 
@@ -387,15 +391,22 @@ export class FileEmbedWidget extends MarkdownRenderChild {
     });
   }
 
+  private resolveEffectiveMode(
+    config: FileTypeConfig | undefined
+  ): EditMode {
+    if (this.subpath) {
+      return "readonly";
+    }
+    return config && config.enabled ? config.embedMode : "readonly";
+  }
+
   private async mountEmbed(): Promise<void> {
     if (this.unloaded || !this.containerEl) {
       return;
     }
 
     const config = this.resolveConfig();
-    const effectiveMode: EditMode = config.enabled
-      ? config.embedMode
-      : "readonly";
+    const effectiveMode: EditMode = this.resolveEffectiveMode(config);
     this.currentMode = effectiveMode;
     this.currentBadgeLabel = config.badgeLabel;
 
@@ -542,7 +553,9 @@ export class FileEmbedWidget extends MarkdownRenderChild {
     );
   }
 
-  private handleConfigUpdated(payload: ConfigUpdatedEventPayload): void {
+  private async handleConfigUpdated(
+    payload: ConfigUpdatedEventPayload
+  ): Promise<void> {
     if (this.unloaded) {
       return;
     }
@@ -568,10 +581,7 @@ export class FileEmbedWidget extends MarkdownRenderChild {
       this.badgeEl.textContent = updatedConfig.badgeLabel;
     }
 
-    const nextMode: EditMode =
-      updatedConfig && updatedConfig.enabled
-        ? updatedConfig.embedMode
-        : "readonly";
+    const nextMode: EditMode = this.resolveEffectiveMode(updatedConfig);
 
     if (
       this.currentMode === nextMode &&
@@ -579,6 +589,11 @@ export class FileEmbedWidget extends MarkdownRenderChild {
     ) {
       return;
     }
+
+    const flushPromise =
+      this.currentMode === "editable" && nextMode !== "editable"
+        ? this.rendererInstance?.flushSave?.()
+        : undefined;
 
     this.currentMode = nextMode;
     this.containerEl?.setAttribute?.("data-edit-mode", nextMode);
@@ -590,6 +605,9 @@ export class FileEmbedWidget extends MarkdownRenderChild {
       this.modeBadgeEl.setAttribute?.("data-edit-mode", nextMode);
     }
     this.rendererInstance?.setMode(nextMode);
+    if (flushPromise) {
+      await flushPromise;
+    }
   }
 
   private destroyRenderer(): void {
@@ -682,6 +700,9 @@ export async function processMarkdownEmbeds(
     if (!file || !plugin.registry.isSupported(file.extension)) {
       return;
     }
+    if (plugin.isExtensionRegisteredInEmbedRegistry?.(file.extension)) {
+      return;
+    }
 
     const widget = new FileEmbedWidget({
       app: plugin.app,
@@ -734,6 +755,9 @@ export async function processMarkdownEmbeds(
         if (!file || !plugin.registry.isSupported(file.extension)) {
           continue;
         }
+        if (plugin.isExtensionRegisteredInEmbedRegistry?.(file.extension)) {
+          continue;
+        }
         const hostSpan = createEl(el, "div", {
           cls: "internal-embed file-support-postproc-embed",
           attr: { src: fullMatch.slice(3, -2) },
@@ -751,25 +775,29 @@ class CM6LivePreviewEmbedWidget extends WidgetType {
   private readonly file: TFile;
   private readonly subpath?: string;
   private readonly mode: EditMode;
+  private readonly sourcePath: string;
   private activeWidget: FileEmbedWidget | null = null;
 
   constructor(
     plugin: FileSupportEmbedHost,
     file: TFile,
     subpath: string | undefined,
-    mode: EditMode
+    mode: EditMode,
+    sourcePath: string = ""
   ) {
     super();
     this.plugin = plugin;
     this.file = file;
     this.subpath = subpath;
     this.mode = mode;
+    this.sourcePath = sourcePath;
   }
 
   eq(other: CM6LivePreviewEmbedWidget): boolean {
     return (
       this.file.path === other.file.path &&
-      this.subpath === other.subpath
+      this.subpath === other.subpath &&
+      this.sourcePath === other.sourcePath
     );
   }
 
@@ -788,6 +816,7 @@ class CM6LivePreviewEmbedWidget extends WidgetType {
       containerEl: container,
       file: this.file,
       subpath: this.subpath,
+      sourcePath: this.sourcePath,
     });
     this.activeWidget = widget;
     (container as any).__fileSupportEmbedWidget = widget;
@@ -811,13 +840,45 @@ class CM6LivePreviewEmbedWidget extends WidgetType {
 
 export interface LivePreviewEmbedExtensionOptions {
   /**
-   * Source path of the Markdown note being edited (optional; resolved from active workspace file if omitted).
+   * Source path of the Markdown note being edited (optional; resolved from `editorInfoField` if omitted).
    */
   sourcePath?: string;
   /**
-   * When true, always render embeds via this CM6 extension even if `app.embedRegistry` is present.
+   * When true, always render embeds via this CM6 extension even if `isExtensionRegisteredInEmbedRegistry` is true.
    */
   forceFallback?: boolean;
+}
+
+function isStateInLivePreview(state: EditorState): boolean {
+  if (!editorLivePreviewField) {
+    return false;
+  }
+  try {
+    return Boolean(state.field(editorLivePreviewField, false));
+  } catch {
+    return false;
+  }
+}
+
+function resolveSourcePathFromState(
+  state: EditorState,
+  options?: LivePreviewEmbedExtensionOptions
+): string {
+  if (typeof options?.sourcePath === "string") {
+    return options.sourcePath;
+  }
+  if (editorInfoField) {
+    try {
+      const info = state.field(editorInfoField, false);
+      const filePath = info?.file?.path;
+      if (typeof filePath === "string") {
+        return filePath;
+      }
+    } catch {
+      // Ignore if editorInfoField is not registered on state
+    }
+  }
+  return "";
 }
 
 function buildLivePreviewDecorations(
@@ -826,15 +887,16 @@ function buildLivePreviewDecorations(
   options?: LivePreviewEmbedExtensionOptions
 ): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
+  if (!isStateInLivePreview(state)) {
+    return builder.finish();
+  }
+
   const docText = state.doc.toString();
   if (!docText.includes("![[")) {
     return builder.finish();
   }
 
-  const activeFile = (plugin.app?.workspace as any)?.getActiveFile?.();
-  const sourcePath =
-    options?.sourcePath ??
-    (activeFile && typeof activeFile.path === "string" ? activeFile.path : "");
+  const sourcePath = resolveSourcePathFromState(state, options);
 
   const regex = new RegExp(WIKI_EMBED_PATTERN.source, "g");
   let match: RegExpExecArray | null;
@@ -855,12 +917,8 @@ function buildLivePreviewDecorations(
       continue;
     }
 
-    // If Obsidian's native embedRegistry already claimed this extension in a live Obsidian session
-    // and forceFallback is not enabled, let Obsidian's native livePreviewPlugin mount it via embedRegistry.
     const handledByNativeEmbedRegistry =
       !options?.forceFallback &&
-      Boolean((plugin.app as any)?.embedRegistry) &&
-      Boolean((plugin.app as any)?.workspace?.activeEditor) &&
       Boolean(plugin.isExtensionRegisteredInEmbedRegistry?.(file.extension));
 
     if (handledByNativeEmbedRegistry) {
@@ -868,7 +926,11 @@ function buildLivePreviewDecorations(
     }
 
     const config = plugin.registry.getForFile(file);
-    const mode: EditMode = config ? config.embedMode : "readonly";
+    const mode: EditMode = parsed.subpath
+      ? "readonly"
+      : config
+        ? config.embedMode
+        : "readonly";
     const widgetEndPos = match.index + fullMatch.length;
 
     builder.add(
@@ -879,7 +941,8 @@ function buildLivePreviewDecorations(
           plugin,
           file,
           parsed.subpath,
-          mode
+          mode,
+          sourcePath
         ),
         side: 1,
       })
@@ -891,7 +954,8 @@ function buildLivePreviewDecorations(
 
 /**
  * CodeMirror 6 Live Preview extension that renders `![[file.ext]]` inline embeds
- * inside Markdown editors when `app.embedRegistry` is unavailable or bypassed.
+ * inside Markdown editors when `editorLivePreviewField` is active and `app.embedRegistry`
+ * did not already claim the extension.
  */
 export function createLivePreviewEmbedExtension(
   plugin: FileSupportEmbedHost,
@@ -902,7 +966,15 @@ export function createLivePreviewEmbedExtension(
       return buildLivePreviewDecorations(state, plugin, options);
     },
     update(decorations, tr) {
-      if (tr.docChanged) {
+      const wasLP = isStateInLivePreview(tr.startState);
+      const isLP = isStateInLivePreview(tr.state);
+      const prevSourcePath = resolveSourcePathFromState(tr.startState, options);
+      const nextSourcePath = resolveSourcePathFromState(tr.state, options);
+      if (
+        tr.docChanged ||
+        wasLP !== isLP ||
+        prevSourcePath !== nextSourcePath
+      ) {
         return buildLivePreviewDecorations(tr.state, plugin, options);
       }
       return decorations.map(tr.changes);

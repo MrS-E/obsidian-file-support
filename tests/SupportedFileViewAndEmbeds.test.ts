@@ -6,6 +6,9 @@ import {
   createMockLeaf,
   createMockManifest,
   createMockTFile,
+  editorInfoField,
+  editorLivePreviewField,
+  setLivePreviewEffect,
 } from "./__mocks__/obsidian";
 import {
   FileEmbedWidget,
@@ -62,10 +65,15 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
     expect(cView.getViewData()).toContain("// edited");
 
     await cView.save();
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
     expect(app.vault.modify).toHaveBeenCalledWith(
       cFile,
       "#include <stdio.h>\nint main() { return 0; }\n// edited"
     );
+
+    // Calling save() again when no further edits were made skips redundant vault.modify
+    await cView.save();
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
 
     // 2. Open server.log in SupportedFileView -> readonly by default
     const logLeaf = createMockLeaf();
@@ -94,7 +102,7 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
     plugin.eventBus.on("metadata:open-or-create", metaOpenSpy);
     const actionEl = logView.getMetadataActionElement() as any;
     expect(actionEl).toBeDefined();
-    actionEl.dispatchEvent({ type: "click" });
+    actionEl.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await Promise.resolve();
     expect(metaOpenSpy).toHaveBeenCalledTimes(1);
     expect(metaOpenSpy.mock.calls[0][0].targetFile).toBe(logFile);
@@ -169,17 +177,18 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
     expect(embedSetModeSpy).toHaveBeenLastCalledWith("editable");
     expect(embedInstance.isReadOnly()).toBe(false);
 
-    // Editing inside the now-editable embed saves changes via vault.modify
+    // Editing inside the now-editable embed saves changes via debounced vault.modify
+    // and flushes automatically when disabling .log transitions the embed back to readonly
     embedInstance.view.dispatch({
       changes: { from: embedInstance.getValue().length, insert: "\nFIXED" },
     });
+
+    // 4. Disabling .log in settings flushes the pending embed edit and forces both open view and embed back to readonly
+    await plugin.updateFileTypeConfig("log", { enabled: false });
     expect(app.vault.modify).toHaveBeenCalledWith(
       logFile,
       "2026-11-15 WARN Disk 90%\nFIXED"
     );
-
-    // 4. Disabling .log in settings forces both open view and embed back to readonly
-    await plugin.updateFileTypeConfig("log", { enabled: false });
     expect(viewInstance.isReadOnly()).toBe(true);
     expect(embedInstance.isReadOnly()).toBe(true);
 
@@ -334,13 +343,32 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
     await plugin.onunload();
   });
 
-  it("handles ![[file]] in Live Preview via CM6 editor extension fallback and cleans up on edit/destroy", async () => {
+  it("handles ![[file]] in Live Preview via CM6 editor extension (gated on editorLivePreviewField, editorInfoField, and native registry skip)", async () => {
     const app = createMockApp() as any;
-    const logFile = createMockTFile("logs/build.log");
-    app.metadataCache.getFirstLinkpathDest = vi.fn((linkpath: string) =>
-      linkpath === "logs/build.log" || linkpath === "build.log" ? logFile : null
+    const logFile = createMockTFile("notes/sub/build.log");
+    const rbFile = createMockTFile("notes/sub/script.rb");
+    const noteFile = createMockTFile("notes/sub/report.md");
+    const unrelatedActiveFile = createMockTFile("other/unrelated.md");
+
+    // Simulate workspace.getActiveFile returning an unrelated note from another pane
+    app.workspace.getActiveFile = vi.fn(() => unrelatedActiveFile);
+    app.workspace.activeEditor = null;
+
+    // Resolve relative linkpaths only when sourcePath matches notes/sub/report.md
+    app.metadataCache.getFirstLinkpathDest = vi.fn(
+      (linkpath: string, sourcePath: string) => {
+        if (sourcePath === "notes/sub/report.md") {
+          if (linkpath === "build.log") return logFile;
+          if (linkpath === "script.rb") return rbFile;
+        }
+        return null;
+      }
     );
-    app.vault.read = vi.fn(async () => "BUILD SUCCESSFUL in 2s");
+    app.vault.read = vi.fn(async (file: any) =>
+      file.path === "notes/sub/build.log"
+        ? "BUILD SUCCESSFUL in 2s"
+        : "puts 'from rb'"
+    );
 
     const plugin = new FileSupportPlugin(app, createMockManifest());
     await plugin.onload();
@@ -348,19 +376,28 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
     expect((plugin as any)._editorExtensions.length).toBe(1);
 
     const hostParent = document.createElement("div");
-    const lpState = EditorState.create({
-      doc: "# Build Report\n![[logs/build.log]]\nDone.",
+
+    // 1. In Source mode (editorLivePreviewField = false), no embed widgets are rendered
+    const sourceState = EditorState.create({
+      doc: "# Build Report\n![[build.log]]\nDone.",
       extensions: [
-        createLivePreviewEmbedExtension(plugin, {
-          sourcePath: "notes/report.md",
-          forceFallback: true,
-        }),
+        editorLivePreviewField.init(() => false),
+        editorInfoField.init(() => ({ app, file: noteFile })),
+        createLivePreviewEmbedExtension(plugin),
       ],
     });
 
     const lpView = new EditorView({
-      state: lpState,
+      state: sourceState,
       parent: hostParent,
+    });
+
+    expect(hostParent.querySelector(".file-support-lp-embed")).toBeNull();
+    expect(plugin.textCodeRendererMiddleware.getActiveInstanceCount()).toBe(0);
+
+    // 2. Toggle editor to Live Preview mode (editorLivePreviewField = true) -> mounts embed using editorInfoField sourcePath
+    lpView.dispatch({
+      effects: setLivePreviewEffect.of(true),
     });
 
     const lpEmbedEl = hostParent.querySelector(
@@ -370,6 +407,7 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
 
     const embeddedWidget: FileEmbedWidget = lpEmbedEl.__fileSupportEmbedWidget;
     expect(embeddedWidget).toBeDefined();
+    expect(embeddedWidget.sourcePath).toBe("notes/sub/report.md");
     await embeddedWidget.loadFile();
 
     expect(embeddedWidget.getRendererInstance()?.getValue()).toBe(
@@ -378,19 +416,327 @@ describe("SupportedFileView, FileEmbedWidget, and Live Config Reconfiguration", 
     expect(embeddedWidget.getMode()).toBe("readonly");
     expect(plugin.textCodeRendererMiddleware.getActiveInstanceCount()).toBe(1);
 
-    // Removing the ![[logs/build.log]] line from the Live Preview document destroys the embed widget cleanly
+    // 3. When an extension (.rb) is registered in native embedRegistry, both Live Preview
+    // (even with workspace.activeEditor === null) and Reading Mode post-processor skip it
+    vi.spyOn(
+      plugin,
+      "isExtensionRegisteredInEmbedRegistry"
+    ).mockImplementation((ext: string) => ext === "rb");
+
     lpView.dispatch({
       changes: {
         from: 0,
         to: lpView.state.doc.length,
-        insert: "# Build Report\nNo embeds here.",
+        insert: "# Build Report\n![[build.log]]\n![[script.rb]]\nDone.",
       },
     });
 
+    const allLpEmbeds = hostParent.querySelectorAll(".file-support-lp-embed");
+    expect(allLpEmbeds.length).toBe(1);
+    expect(allLpEmbeds[0].getAttribute("src")).toBe("notes/sub/build.log");
+
+    // Reading Mode post-processor also skips native-registered .rb while mounting non-native .log
+    const readingSectionEl = document.createElement("div");
+    const rbSpan = document.createElement("span");
+    rbSpan.className = "internal-embed";
+    rbSpan.setAttribute("src", "script.rb");
+    readingSectionEl.appendChild(rbSpan);
+
+    const logSpan = document.createElement("span");
+    logSpan.className = "internal-embed";
+    logSpan.setAttribute("src", "build.log");
+    readingSectionEl.appendChild(logSpan);
+
+    const readingCtx: any = {
+      docId: "doc-lp",
+      sourcePath: "notes/sub/report.md",
+      frontmatter: null,
+      addChild: vi.fn((child: any) => child.load()),
+      getSectionInfo: () => null,
+    };
+
+    const readingWidgets = await processMarkdownEmbeds(
+      readingSectionEl,
+      readingCtx,
+      plugin
+    );
+    expect(readingWidgets.length).toBe(1);
+    expect(readingWidgets[0].file.path).toBe("notes/sub/build.log");
+    expect(rbSpan.getAttribute("data-file-support-mounted")).toBeNull();
+    readingWidgets[0].unload();
+
+    // 4. Switching back to Source mode unmounts the Live Preview embed widget cleanly
+    lpView.dispatch({
+      effects: setLivePreviewEffect.of(false),
+    });
     expect(hostParent.querySelector(".file-support-lp-embed")).toBeNull();
     expect(plugin.textCodeRendererMiddleware.getActiveInstanceCount()).toBe(0);
 
     lpView.destroy();
+    await plugin.onunload();
+  });
+
+  it("flushes pending dirty tab edits before switching to read-only or disabling the extension", async () => {
+    const app = createMockApp() as any;
+    const files: Record<string, string> = {
+      "src/app.c": "int x = 1;",
+    };
+    app.vault.read = vi.fn(async (file: any) => files[file.path] ?? "");
+    app.vault.modify = vi.fn(async (file: any, data: string) => {
+      files[file.path] = data;
+    });
+
+    const plugin = new FileSupportPlugin(app, createMockManifest());
+    await plugin.onload();
+
+    const cFile = createMockTFile("src/app.c") as any;
+    const view = new SupportedFileView(createMockLeaf(), plugin);
+    view.onload();
+    await view.onLoadFile(cFile);
+
+    const cmInstance = view.getRendererInstance() as CM6RendererInstance;
+    expect(view.getMode()).toBe("editable");
+
+    // 1. User edits in the tab (requestSave debounce is pending, save() not called yet)
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: "\nint y = 2;" },
+    });
+    expect(app.vault.modify).not.toHaveBeenCalled();
+
+    // Flip .c tabMode from editable -> readonly: flushes save() before locking editor
+    await plugin.updateFileTypeConfig("c", { tabMode: "readonly" });
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
+    expect(app.vault.modify).toHaveBeenLastCalledWith(
+      cFile,
+      "int x = 1;\nint y = 2;"
+    );
+    expect(view.getMode()).toBe("readonly");
+    expect(cmInstance.isReadOnly()).toBe(true);
+
+    // 2. Flip .c back to editable, make another edit, then disable .c extension -> also flushes save()
+    await plugin.updateFileTypeConfig("c", { tabMode: "editable" });
+    expect(view.getMode()).toBe("editable");
+
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: "\nint z = 3;" },
+    });
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
+
+    await plugin.updateFileTypeConfig("c", { enabled: false });
+    expect(app.vault.modify).toHaveBeenCalledTimes(2);
+    expect(app.vault.modify).toHaveBeenLastCalledWith(
+      cFile,
+      "int x = 1;\nint y = 2;\nint z = 3;"
+    );
+    expect(view.getMode()).toBe("readonly");
+    expect(cmInstance.isReadOnly()).toBe(true);
+
+    view.onunload();
+    await plugin.onunload();
+  });
+
+  it("forces subpath embeds (#L2-L4) to read-only even when embedMode is editable", async () => {
+    const app = createMockApp() as any;
+    const cFile = createMockTFile("src/module.c") as any;
+    const originalContent = ["line 1", "line 2", "line 3", "line 4", "line 5"].join("\n");
+    app.vault.read = vi.fn(async () => originalContent);
+    app.vault.modify = vi.fn(async () => {});
+
+    const plugin = new FileSupportPlugin(app, createMockManifest());
+    await plugin.onload();
+
+    // Configure .c embeds to be editable
+    await plugin.updateFileTypeConfig("c", { embedMode: "editable" });
+
+    // Mount a subpath embed ![[src/module.c#L2-L4]]
+    const containerEl = document.createElement("div");
+    const subpathEmbed = new FileEmbedWidget({
+      app,
+      plugin,
+      containerEl,
+      file: cFile,
+      subpath: "#L2-L4",
+    });
+    subpathEmbed.load();
+    await subpathEmbed.loadFile();
+
+    const cmInstance = subpathEmbed.getRendererInstance() as CM6RendererInstance;
+    expect(subpathEmbed.getMode()).toBe("readonly");
+    expect(cmInstance.getMode()).toBe("readonly");
+    expect(cmInstance.isReadOnly()).toBe(true);
+    expect(cmInstance.getValue()).toBe("line 2\nline 3\nline 4");
+    expect(
+      containerEl.querySelector(".file-support-embed-mode")?.textContent
+    ).toBe("Read-only");
+    expect(
+      containerEl
+        .querySelector(".file-support-embed-mode")
+        ?.getAttribute("data-edit-mode")
+    ).toBe("readonly");
+
+    // Attempt to dispatch an edit in the subpath embed -> blocked by readOnly compartment
+    cmInstance.view.dispatch({
+      changes: { from: 0, insert: "EDITED " },
+    });
+    expect(cmInstance.getValue()).toBe("line 2\nline 3\nline 4");
+    expect(app.vault.modify).not.toHaveBeenCalled();
+
+    // Triggering a config update with embedMode: 'editable' still keeps subpath embed read-only
+    await plugin.updateFileTypeConfig("c", { badgeLabel: "C99", embedMode: "editable" });
+    expect(subpathEmbed.getMode()).toBe("readonly");
+    expect(cmInstance.isReadOnly()).toBe(true);
+    expect(
+      containerEl.querySelector(".file-support-embed-mode")?.textContent
+    ).toBe("Read-only");
+
+    subpathEmbed.unload();
+    await plugin.onunload();
+  });
+
+  it("debounces and serializes editable embed saves, refreshes on external vault modify without clobbering dirty edits, and cleans up subscriptions", async () => {
+    const app = createMockApp() as any;
+    const txtFile = createMockTFile("notes/todo.txt") as any;
+    let diskContent = "initial";
+
+    let pendingWriteResolvers: Array<() => void> = [];
+    let interceptWrites = false;
+    let activeWriteCount = 0;
+    let maxConcurrentWrites = 0;
+
+    app.vault.read = vi.fn(async () => diskContent);
+    app.vault.modify = vi.fn(async (_file: any, newData: string) => {
+      activeWriteCount++;
+      maxConcurrentWrites = Math.max(maxConcurrentWrites, activeWriteCount);
+      if (interceptWrites) {
+        await new Promise<void>((resolve) => {
+          pendingWriteResolvers.push(resolve);
+        });
+      }
+      diskContent = newData;
+      activeWriteCount--;
+    });
+
+    const plugin = new FileSupportPlugin(app, createMockManifest());
+    await plugin.onload();
+    await plugin.updateFileTypeConfig("txt", { embedMode: "editable" });
+
+    const containerEl = document.createElement("div");
+    const embed = new FileEmbedWidget({
+      app,
+      plugin,
+      containerEl,
+      file: txtFile,
+    });
+    embed.load();
+    await embed.loadFile();
+
+    expect(app.vault.listenerCount("modify")).toBe(1);
+
+    const cmInstance = embed.getRendererInstance() as CM6RendererInstance;
+    expect(cmInstance.getMode()).toBe("editable");
+    expect(cmInstance.getValue()).toBe("initial");
+
+    // 1. External vault modify while embed is clean refreshes the embed editor via setValue
+    diskContent = "updated externally";
+    app.vault.trigger("modify", txtFile);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cmInstance.getValue()).toBe("updated externally");
+    expect(app.vault.modify).not.toHaveBeenCalled();
+
+    // 2. Rapid keystrokes are coalesced by the debounce timer into a single vault.modify call
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " 1" },
+    });
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " 2" },
+    });
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " 3" },
+    });
+    expect(app.vault.modify).not.toHaveBeenCalled();
+
+    // 3. While embed has pending dirty edits (before debounce timer expires),
+    // an external vault modify event MUST NOT clobber the user's dirty edits in the editor
+    diskContent = "conflicting external change";
+    app.vault.trigger("modify", txtFile);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cmInstance.getValue()).toBe("updated externally 1 2 3");
+
+    // Flush the debounced save -> only 1 vault.modify call occurred for all 3 keystrokes
+    await embed.flushSave();
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
+    expect(app.vault.modify).toHaveBeenLastCalledWith(
+      txtFile,
+      "updated externally 1 2 3"
+    );
+    expect(diskContent).toBe("updated externally 1 2 3");
+
+    // 3b. Also verify natural debounce timer expiration (without manual flushSave) and
+    // conflict guard when an async vault.read from external modify resolves after user types
+    const slowReadResolvers: Array<(val: string) => void> = [];
+    app.vault.read = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          slowReadResolvers.push(resolve);
+        })
+    );
+    app.vault.trigger("modify", txtFile);
+    // User types while external modify's vault.read is still in-flight
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " 4" },
+    });
+    // Now external modify's slow vault.read resolves with stale/conflicting data -> must NOT clobber " 4"
+    slowReadResolvers.shift()?.("stale async read");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cmInstance.getValue()).toBe("updated externally 1 2 3 4");
+
+    // Wait for natural debounce timer (150ms) to persist "updated externally 1 2 3 4"
+    await new Promise((r) => setTimeout(r, 180));
+    expect(app.vault.modify).toHaveBeenCalledTimes(2);
+    expect(diskContent).toBe("updated externally 1 2 3 4");
+    app.vault.read = vi.fn(async () => diskContent);
+
+    // 4. Slow async writes are serialized and never execute concurrently
+    app.vault.modify.mockClear();
+    interceptWrites = true;
+
+    // Start Write #1
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " A" },
+    });
+    const firstSavePromise = embed.flushSave();
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
+    expect(activeWriteCount).toBe(1);
+
+    // While Write #1 is still in-flight, user types " B" and " C" and debounce expires
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " B" },
+    });
+    cmInstance.view.dispatch({
+      changes: { from: cmInstance.getValue().length, insert: " C" },
+    });
+    const secondSavePromise = embed.flushSave();
+
+    // Second write has NOT started yet while first write is in flight
+    expect(app.vault.modify).toHaveBeenCalledTimes(1);
+    expect(maxConcurrentWrites).toBe(1);
+
+    // Resolve Write #1 -> Write #2 now starts with coalesced " B C"
+    pendingWriteResolvers.shift()?.();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(app.vault.modify).toHaveBeenCalledTimes(2);
+    expect(maxConcurrentWrites).toBe(1);
+
+    // Resolve Write #2
+    pendingWriteResolvers.shift()?.();
+    await Promise.all([firstSavePromise, secondSavePromise]);
+    expect(diskContent).toBe("updated externally 1 2 3 4 A B C");
+    expect(maxConcurrentWrites).toBe(1);
+
+    // 5. Unloading the embed cleans up the vault.on('modify') subscription
+    embed.unload();
+    expect(app.vault.listenerCount("modify")).toBe(0);
+
     await plugin.onunload();
   });
 

@@ -179,8 +179,11 @@ function applyModeAttributes(el: HTMLElement, mode: EditMode): void {
 export class CM6EditorFactory {
   static createEditor(options: CM6EditorMountOptions): CM6RendererInstance {
     const readOnlyCompartment = new Compartment();
+    const hasSubpath = Boolean(
+      options.isEmbed && options.subpath && options.subpath.trim().length > 0
+    );
     let currentMode: EditMode =
-      options.mode === "editable" ? "editable" : "readonly";
+      !hasSubpath && options.mode === "editable" ? "editable" : "readonly";
     let destroyed = false;
 
     const { text: initialDoc, startLine } = options.isEmbed
@@ -295,7 +298,7 @@ export class CM6EditorFactory {
           return;
         }
         const normalizedMode: EditMode =
-          mode === "editable" ? "editable" : "readonly";
+          !hasSubpath && mode === "editable" ? "editable" : "readonly";
         if (
           normalizedMode === currentMode &&
           view.state.readOnly === (normalizedMode === "readonly")
