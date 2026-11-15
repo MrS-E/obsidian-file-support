@@ -712,21 +712,59 @@ function createEventEmitterTarget<T extends Record<string, any>>(
   });
 }
 
+function updateMockFileLocation(file: TAbstractFile, newPath: string): void {
+  if (!file) return;
+  const normalized = normalizePath(newPath);
+  file.path = normalized;
+  const parts = normalized.split("/");
+  file.name = parts[parts.length - 1] ?? "";
+  if (file instanceof TFile || ("basename" in file && "extension" in file)) {
+    const tfile = file as TFile;
+    const dotIndex = tfile.name.lastIndexOf(".");
+    if (dotIndex > 0) {
+      tfile.basename = tfile.name.slice(0, dotIndex);
+      tfile.extension = tfile.name.slice(dotIndex + 1);
+    } else {
+      tfile.basename = tfile.name;
+      tfile.extension = "";
+    }
+  }
+}
+
 export class App {
   vault: any = createEventEmitterTarget({
     getAbstractFileByPath: (_path: string) => null,
     read: async (_file: TFile) => "",
     modify: async (_file: TFile, _data: string) => {},
     create: async (path: string, _data: string) => new TFile(path),
-    rename: async (_file: TAbstractFile, _newPath: string) => {},
+    rename: async (file: TAbstractFile, newPath: string) => {
+      updateMockFileLocation(file, newPath);
+    },
   });
   metadataCache: any = createEventEmitterTarget({
     getFileCache: (_file: TFile) => null,
     getFirstLinkpathDest: (_linkpath: string, _sourcePath: string) => null,
   });
   fileManager: any = {
-    processFrontMatter: async (_file: TFile, _fn: (fm: Record<string, any>) => void) => {},
-    renameFile: async (_file: TAbstractFile, _newPath: string) => {},
+    processFrontMatter: async (
+      file: TFile,
+      fn: (fm: Record<string, any>) => void
+    ) => {
+      const cache = this.metadataCache?.getFileCache?.(file);
+      const fm: Record<string, any> =
+        cache?.frontmatter && typeof cache.frontmatter === "object"
+          ? cache.frontmatter
+          : {};
+      if (typeof fn === "function") {
+        fn(fm);
+      }
+    },
+    renameFile: async (file: TAbstractFile, newPath: string) => {
+      if (typeof this.vault?.rename === "function") {
+        await this.vault.rename(file, newPath);
+      }
+      updateMockFileLocation(file, newPath);
+    },
   };
   workspace: any = createEventEmitterTarget({
     getLeavesOfType: (_type: string) => [],

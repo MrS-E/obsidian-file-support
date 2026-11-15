@@ -12,6 +12,8 @@ import {
   createLivePreviewEmbedExtension,
   processMarkdownEmbeds,
 } from "./embeds/FileEmbedWidget";
+import { LazyPairResolver } from "./metadata/LazyPairResolver";
+import { MetadataCompanionMiddleware } from "./middlewares/MetadataCompanionMiddleware";
 import { TextCodeRendererMiddleware } from "./middlewares/TextCodeRendererMiddleware";
 import { RendererRegistry } from "./renderers/RendererRegistry";
 import {
@@ -80,6 +82,13 @@ export default class FileSupportPlugin
   rendererRegistry: RendererRegistry = new RendererRegistry();
   textCodeRendererMiddleware: TextCodeRendererMiddleware =
     new TextCodeRendererMiddleware(this.rendererRegistry);
+  pairResolver: LazyPairResolver = new LazyPairResolver(
+    this.app,
+    () => this.settings,
+    this.registry
+  );
+  metadataCompanionMiddleware: MetadataCompanionMiddleware =
+    new MetadataCompanionMiddleware(this.app, this.pairResolver);
 
   private lastSavedSettings: PluginSettings = createDefaultSettings();
   private registeredViewExtensions: Set<string> = new Set();
@@ -89,6 +98,9 @@ export default class FileSupportPlugin
   async onload(): Promise<void> {
     await this.loadSettings();
 
+    this.pairResolver.setApp(this.app);
+    this.metadataCompanionMiddleware.setApp(this.app);
+    this.metadataCompanionMiddleware.register(this.eventBus);
     this.textCodeRendererMiddleware.register(this.eventBus);
 
     this.registerView(
@@ -113,6 +125,7 @@ export default class FileSupportPlugin
   async onunload(): Promise<void> {
     this.unregisterAllEmbedRegistryExtensions();
     this.unregisterAllViewExtensions();
+    this.metadataCompanionMiddleware.destroy();
     this.textCodeRendererMiddleware.destroy();
     this.eventBus.clear();
   }
