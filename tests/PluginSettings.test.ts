@@ -279,6 +279,39 @@ describe("PluginSettings serialization, merging, and validation", () => {
     expect(plugin3.settings.fileTypes.gradle).toBeUndefined();
   });
 
+  it("loads constructor from persisted settings as a valid custom file type", async () => {
+    const plugin = new FileSupportPlugin(
+      createMockApp() as any,
+      createMockManifest()
+    );
+    (plugin as any)._data = {
+      fileTypes: {
+        constructor: {
+          extension: "constructor",
+          badgeLabel: "CTOR",
+          tabMode: "readonly",
+        },
+      },
+    };
+
+    await plugin.loadSettings();
+
+    expect(plugin.registry.get("constructor")).toMatchObject({
+      extension: "constructor",
+      badgeLabel: "CTOR",
+      category: "custom",
+      languageId: "plaintext",
+      rendererId: "cm6-text",
+      tabMode: "readonly",
+      embedMode: "readonly",
+      enabled: true,
+      isCustom: true,
+    });
+    expect(plugin.settings.fileTypes.constructor).toEqual(
+      plugin.registry.get("constructor")
+    );
+  });
+
   it("exercises FileSupportSettingTab UI controls including Add extension button, validation Notices, badge input, and trash button", async () => {
     const app = createMockApp() as any;
     const plugin = new FileSupportPlugin(app, createMockManifest());

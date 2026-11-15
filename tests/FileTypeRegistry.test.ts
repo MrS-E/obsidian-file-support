@@ -248,4 +248,21 @@ describe("FileTypeRegistry", () => {
     expect(resolvedCustom.extractorId).toBe("passthrough");
     expect("extraGarbage" in resolvedCustom).toBe(false);
   });
+
+  it("treats constructor as a custom extension instead of an inherited preset key", () => {
+    const registry = new FileTypeRegistry();
+    const config = registry.register({ extension: "constructor" });
+
+    expect(config).toMatchObject({
+      extension: "constructor",
+      badgeLabel: "CONSTRUCTOR",
+      category: "custom",
+      tabMode: "editable",
+      embedMode: "readonly",
+      enabled: true,
+      isCustom: true,
+    });
+    expect(registry.get("constructor")).toEqual(config);
+    expect(registry.resetConfig("constructor")).toBeUndefined();
+  });
 });

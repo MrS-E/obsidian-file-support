@@ -244,7 +244,9 @@ export function resolveFileTypeConfig(
       : {}
   ) as Partial<FileTypeConfig>;
 
-  const preset = DEFAULT_FILE_TYPE_PRESETS[norm];
+  const preset = isBuiltInExtension(norm)
+    ? DEFAULT_FILE_TYPE_PRESETS[norm]
+    : undefined;
   if (preset) {
     const badgeLabel =
       typeof p.badgeLabel === "string" && p.badgeLabel.trim().length > 0
@@ -510,7 +512,9 @@ export class FileTypeRegistry {
    */
   resetConfig(extension: string): FileTypeConfig | undefined {
     const ext = normalizeExtension(extension);
-    const preset = DEFAULT_FILE_TYPE_PRESETS[ext];
+    const preset = isBuiltInExtension(ext)
+      ? DEFAULT_FILE_TYPE_PRESETS[ext]
+      : undefined;
     if (!preset) {
       return undefined;
     }
