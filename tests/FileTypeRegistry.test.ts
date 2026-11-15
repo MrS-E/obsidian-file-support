@@ -33,6 +33,18 @@ describe("FileTypeRegistry", () => {
       "cfg",
     ];
     const readonlyTabExtensions = ["log", "patch", "diff"];
+    const archiveExtensions = [
+      "tar",
+      "tgz",
+      "gz",
+      "tbz2",
+      "tbz",
+      "bz2",
+      "txz",
+      "xz",
+      "tzst",
+      "zst",
+    ];
 
     for (const ext of editableTabExtensions) {
       const cfg = registry.get(ext);
@@ -52,6 +64,18 @@ describe("FileTypeRegistry", () => {
       expect(cfg?.tabMode).toBe("readonly");
       expect(cfg?.embedMode).toBe("readonly");
       expect(cfg?.badgeLabel).toBe(ext.toUpperCase());
+      expect(cfg?.isCustom).toBe(false);
+      expect(isBuiltInExtension(ext)).toBe(true);
+    }
+
+    for (const ext of archiveExtensions) {
+      const cfg = registry.get(ext);
+      expect(cfg).toBeDefined();
+      expect(cfg?.enabled).toBe(true);
+      expect(cfg?.tabMode).toBe("readonly");
+      expect(cfg?.embedMode).toBe("readonly");
+      expect(cfg?.category).toBe("binary");
+      expect(cfg?.rendererId).toBe("archive-viewer");
       expect(cfg?.isCustom).toBe(false);
       expect(isBuiltInExtension(ext)).toBe(true);
     }

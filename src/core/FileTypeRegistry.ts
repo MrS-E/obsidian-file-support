@@ -214,9 +214,14 @@ export const DEFAULT_FILE_TYPE_PRESETS: Readonly<
   diff: Object.freeze(createPreset("diff", "patch", "DIFF", "diff", "readonly")),
   tar: Object.freeze(createArchivePreset("tar", "TAR")),
   tgz: Object.freeze(createArchivePreset("tgz", "TGZ")),
+  gz: Object.freeze(createArchivePreset("gz", "TGZ")),
   tbz2: Object.freeze(createArchivePreset("tbz2", "TBZ2")),
+  tbz: Object.freeze(createArchivePreset("tbz", "TBZ2")),
+  bz2: Object.freeze(createArchivePreset("bz2", "TBZ2")),
   txz: Object.freeze(createArchivePreset("txz", "TXZ")),
+  xz: Object.freeze(createArchivePreset("xz", "TXZ")),
   tzst: Object.freeze(createArchivePreset("tzst", "TZST")),
+  zst: Object.freeze(createArchivePreset("zst", "TZST")),
 });
 
 /**

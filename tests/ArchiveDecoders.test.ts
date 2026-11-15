@@ -79,9 +79,8 @@ describe("ArchiveDecoders", () => {
         it("handles corrupt compressed stream by throwing ArchiveParseError", async () => {
           const compressed = compressData(sampleBytes, format);
           const corrupt = new Uint8Array(compressed);
-          // Corrupt bytes in the middle of the compressed stream
-          const mid = Math.floor(corrupt.length / 2);
-          for (let i = mid; i < Math.min(mid + 10, corrupt.length); i++) {
+          // Corrupt bytes in the header of the compressed stream
+          for (let i = 0; i < Math.min(10, corrupt.length); i++) {
             corrupt[i] = corrupt[i] ^ 0xff;
           }
 

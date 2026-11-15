@@ -346,6 +346,49 @@ describe("FileTreeMiddleware, File Explorer Badges, Companion Hiding/Underlining
     await plugin.onunload();
   });
 
+  it("decorates archive files (tar, tgz, gz, tbz2, tbz, bz2, txz, xz, tzst, zst) in file tree", async () => {
+    const env = createTestVaultAndDomEnv();
+
+    const tarFile = env.addFile("archives/archive.tar");
+    const tgzFile = env.addFile("archives/bundle.tgz");
+    const tarGzFile = env.addFile("archives/data.tar.gz");
+    const tbz2File = env.addFile("archives/backup.tbz2");
+    const tbzFile = env.addFile("archives/backup.tbz");
+    const tarBz2File = env.addFile("archives/backup.tar.bz2");
+    const txzFile = env.addFile("archives/dist.txz");
+    const tarXzFile = env.addFile("archives/dist.tar.xz");
+    const tzstFile = env.addFile("archives/pack.tzst");
+    const tarZstFile = env.addFile("archives/pack.tar.zst");
+
+    const folder = env.addTreeFolderItem(env.navContainer, "archives");
+    const tarItem = env.addTreeFileItem(folder.childrenEl, "archives/archive.tar");
+    const tgzItem = env.addTreeFileItem(folder.childrenEl, "archives/bundle.tgz");
+    const tarGzItem = env.addTreeFileItem(folder.childrenEl, "archives/data.tar.gz");
+    const tbz2Item = env.addTreeFileItem(folder.childrenEl, "archives/backup.tbz2");
+    const tbzItem = env.addTreeFileItem(folder.childrenEl, "archives/backup.tbz");
+    const tarBz2Item = env.addTreeFileItem(folder.childrenEl, "archives/backup.tar.bz2");
+    const txzItem = env.addTreeFileItem(folder.childrenEl, "archives/dist.txz");
+    const tarXzItem = env.addTreeFileItem(folder.childrenEl, "archives/dist.tar.xz");
+    const tzstItem = env.addTreeFileItem(folder.childrenEl, "archives/pack.tzst");
+    const tarZstItem = env.addTreeFileItem(folder.childrenEl, "archives/pack.tar.zst");
+
+    const plugin = new FileSupportPlugin(env.app, createMockManifest());
+    await plugin.onload();
+
+    expect(tarItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TAR");
+    expect(tgzItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TGZ");
+    expect(tarGzItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TGZ");
+    expect(tbz2Item.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TBZ2");
+    expect(tbzItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TBZ2");
+    expect(tarBz2Item.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TBZ2");
+    expect(txzItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TXZ");
+    expect(tarXzItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TXZ");
+    expect(tzstItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TZST");
+    expect(tarZstItem.titleEl.querySelector(".nav-file-tag")?.textContent).toBe("TZST");
+
+    await plugin.onunload();
+  });
+
   it("hides only verified paired companion .md notes and underlines their target files, respecting enableMetadataFiles and metadataDirRegex", async () => {
     const env = createTestVaultAndDomEnv();
 

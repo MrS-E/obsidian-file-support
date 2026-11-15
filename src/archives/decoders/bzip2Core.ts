@@ -338,7 +338,7 @@ export function decompressBzip2Block(
       if (dbufCount + run > bufsize) {
         throw new ArchiveParseError("bzip2 buffer overflow during run expansion", "DECODER_ERROR");
       }
-      const uc = symToByte[mtfSymbols[0]];
+      const uc = symToByte[symIndex[0]];
       byteCount[uc] += run;
       while (run-- > 0) {
         buf[dbufCount++] = uc;
@@ -379,53 +379,43 @@ export function decompressBzip2Block(
     total += byteCount[i];
   }
 
+  const tt = new Int32Array(dbufCount);
   for (let i = 0; i < dbufCount; i++) {
     const uc = buf[i] & 0xff;
-    buf[unwrapBase[uc]] |= i << 8;
+    tt[unwrapBase[uc]] = (i << 8) | uc;
     unwrapBase[uc]++;
   }
 
   // Inverse BWT & RLE decompression output
-  let pos = 0;
-  let current = 0;
+  let pos = origPtr;
+  let previous = -1;
   run = 0;
-
-  if (dbufCount > 0) {
-    pos = buf[origPtr];
-    current = pos & 0xff;
-    pos >>= 8;
-    run = -1;
-  }
-
-  let copies = 0;
-  let previous = 0;
-  let outbyte = 0;
   let crc = 0xffffffff;
   let count = dbufCount;
 
   while (count > 0) {
     count--;
-    previous = current;
-    pos = buf[pos];
-    current = pos & 0xff;
-    pos >>= 8;
+    const val = tt[pos];
+    const b = val & 0xff;
+    pos = val >> 8;
 
-    if (run++ === 3) {
-      copies = current;
-      outbyte = previous;
-      current = -1;
-    } else {
-      copies = 1;
-      outbyte = current;
-    }
-
-    while (copies-- > 0) {
-      crc = ((crc << 8) ^ BZIP2_CRC32_TABLE[((crc >>> 24) ^ outbyte) & 0xff]) >>> 0;
-      onByte(outbyte);
-    }
-
-    if (current !== previous) {
+    if (run === 4) {
+      const copies = b;
+      for (let i = 0; i < copies; i++) {
+        crc = ((crc << 8) ^ BZIP2_CRC32_TABLE[((crc >>> 24) ^ previous) & 0xff]) >>> 0;
+        onByte(previous);
+      }
       run = 0;
+      previous = -1;
+    } else {
+      crc = ((crc << 8) ^ BZIP2_CRC32_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0;
+      onByte(b);
+      if (b === previous) {
+        run++;
+      } else {
+        run = 1;
+        previous = b;
+      }
     }
   }
 
