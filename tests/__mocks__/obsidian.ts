@@ -791,6 +791,17 @@ export class App {
     getAbstractFileByPath: (_path: string) => null,
     read: async (_file: TFile) => "",
     modify: async (_file: TFile, _data: string) => {},
+    process: async (file: TFile, fn: (data: string) => string) => {
+      const current =
+        typeof this.vault?.read === "function"
+          ? await this.vault.read(file)
+          : "";
+      const next = fn(current);
+      if (next !== current && typeof this.vault?.modify === "function") {
+        await this.vault.modify(file, next);
+      }
+      return next;
+    },
     create: async (path: string, _data: string) => new TFile(path),
     rename: async (file: TAbstractFile, newPath: string) => {
       updateMockFileLocation(file, newPath);

@@ -17,12 +17,16 @@ import {
   EXTRACTED_SECTION_START_MARKER,
   ExtractorMiddleware,
   ExtractorRegistry,
+  NONE_EXTRACTOR_ID,
+  NOOP_EXTRACTOR_ID,
   NoOpPassthroughExtractor,
   PassthroughExtractor,
   REFRESH_EXTRACTED_METADATA_COMMAND_ID,
   REFRESH_EXTRACTED_METADATA_TITLE,
+  detectLineEnding,
   hasExtractedMarkdownSection,
   readExtractedMarkdownSection,
+  splitMarkdownFrontmatterAndBody,
   updateExtractedMarkdownSection,
 } from "../src/extractors/ExtractorMiddleware";
 import FileSupportPlugin from "../src/main";
@@ -50,6 +54,36 @@ interface InMemoryExtractorVaultEnv {
   ) => TFile;
   setFileContent: (path: string, content: string) => void;
   getFileContent: (path: string) => string;
+}
+
+function serializeMockYamlFrontmatter(
+  fm: Record<string, any>,
+  eol: "\r\n" | "\n" = "\n"
+): string {
+  const lines: string[] = ["---"];
+  for (const [key, value] of Object.entries(fm)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        lines.push(`${key}: []`);
+      } else {
+        lines.push(`${key}:`);
+        for (const item of value) {
+          lines.push(`  - ${String(item)}`);
+        }
+      }
+    } else if (typeof value === "string") {
+      const needsQuotes =
+        value.includes("[[") || value.includes(":") || value.includes("#");
+      lines.push(`${key}: ${needsQuotes ? JSON.stringify(value) : value}`);
+    } else {
+      lines.push(`${key}: ${String(value)}`);
+    }
+  }
+  lines.push("---", "");
+  return lines.join(eol);
 }
 
 function createInMemoryExtractorVaultEnv(): InMemoryExtractorVaultEnv {
@@ -102,6 +136,17 @@ function createInMemoryExtractorVaultEnv(): InMemoryExtractorVaultEnv {
     app.vault.trigger("modify", file);
   });
 
+  app.vault.process = vi.fn(
+    async (file: TFile, fn: (data: string) => string) => {
+      const current = await app.vault.read(file);
+      const next = fn(current);
+      if (next !== current) {
+        await app.vault.modify(file, next);
+      }
+      return next;
+    }
+  );
+
   app.vault.create = vi.fn(async (path: string, data: string) => {
     const norm = normalizePath(path);
     const file = createMockTFile(norm);
@@ -109,6 +154,15 @@ function createInMemoryExtractorVaultEnv(): InMemoryExtractorVaultEnv {
     contents.set(norm, data);
     app.vault.trigger("create", file);
     return file;
+  });
+
+  app.vault.delete = vi.fn(async (file: TFile) => {
+    const norm = normalizePath(file.path);
+    files.delete(norm);
+    contents.delete(norm);
+    frontmatters.delete(norm);
+    app.vault.trigger("delete", file);
+    app.metadataCache.trigger("deleted", file);
   });
 
   app.vault.rename = vi.fn(async (file: TFile, newPath: string) => {
@@ -154,6 +208,14 @@ function createInMemoryExtractorVaultEnv(): InMemoryExtractorVaultEnv {
         : {};
       fn(current);
       frontmatters.set(norm, current);
+
+      // Also synchronize the serialized YAML frontmatter block in the underlying file text
+      const existingContent = contents.get(norm) ?? "";
+      const eol = detectLineEnding(existingContent);
+      const { bodyContent } = splitMarkdownFrontmatterAndBody(existingContent);
+      const serializedFm = serializeMockYamlFrontmatter(current, eol);
+      contents.set(norm, serializedFm + bodyContent);
+      app.metadataCache.trigger("changed", file);
     }
   );
 
@@ -231,6 +293,22 @@ describe("ExtractorRegistry & NoOpPassthroughExtractor", () => {
       extractorId: "ocr-engine",
     };
     expect(registry.resolve(logFile, logWithExplicitId)).toBe(customOcrAdapter);
+
+    // 3.5. Explicit "noop" and "none" aliases resolve to NoOpPassthroughExtractor (even when logAdapter is registered)
+    expect(registry.has(NOOP_EXTRACTOR_ID)).toBe(true);
+    expect(registry.has(NONE_EXTRACTOR_ID)).toBe(true);
+    expect(registry.get(NOOP_EXTRACTOR_ID)).toBeInstanceOf(
+      NoOpPassthroughExtractor
+    );
+    expect(registry.get(NONE_EXTRACTOR_ID)).toBeInstanceOf(
+      NoOpPassthroughExtractor
+    );
+    expect(
+      registry.resolve(logFile, { ...logConfig, extractorId: NOOP_EXTRACTOR_ID })
+    ).toBeInstanceOf(NoOpPassthroughExtractor);
+    expect(
+      registry.resolve(logFile, { ...logConfig, extractorId: NONE_EXTRACTOR_ID })
+    ).toBeInstanceOf(NoOpPassthroughExtractor);
 
     // 4. Unknown explicit extractorId resolves to undefined (does not silently run an unrelated adapter)
     const logWithUnknownId: FileTypeConfig = {
@@ -458,6 +536,149 @@ describe("Structured Managed Markdown Section Updater", () => {
       "New extracted block"
     );
   });
+
+  it("ignores managed markers inside user fenced code blocks (``` and ~~~) and inline prose without overwriting user fences", () => {
+    const docWithFencedMarkers = [
+      "---",
+      'file-support-target: "[[plugin.js]]"',
+      "---",
+      "# Plugin Documentation",
+      "Inline example: `<!-- file-support:extracted:start -->` and `<!-- file-support:extracted:end -->` on one line.",
+      "",
+      "```markdown",
+      EXTRACTED_SECTION_START_MARKER,
+      "This example block inside a backtick code fence MUST NOT be overwritten!",
+      EXTRACTED_SECTION_END_MARKER,
+      "```",
+      "",
+      "~~~html",
+      EXTRACTED_SECTION_START_MARKER,
+      "This example block inside a tilde code fence MUST NOT be overwritten either!",
+      EXTRACTED_SECTION_END_MARKER,
+      "~~~",
+      "",
+      "User concluding paragraph.",
+    ].join("\n");
+
+    // 1. Neither fenced block nor inline markers should be detected as an active managed block
+    expect(hasExtractedMarkdownSection(docWithFencedMarkers)).toBe(false);
+    expect(readExtractedMarkdownSection(docWithFencedMarkers)).toBeNull();
+
+    // 2. First extraction appends a real standalone managed block at the end without touching the fences
+    const afterFirstExtract = updateExtractedMarkdownSection(
+      docWithFencedMarkers,
+      "Extracted AST: `export function init()`"
+    );
+
+    expect(afterFirstExtract).toContain(
+      [
+        "```markdown",
+        EXTRACTED_SECTION_START_MARKER,
+        "This example block inside a backtick code fence MUST NOT be overwritten!",
+        EXTRACTED_SECTION_END_MARKER,
+        "```",
+      ].join("\n")
+    );
+    expect(afterFirstExtract).toContain(
+      [
+        "~~~html",
+        EXTRACTED_SECTION_START_MARKER,
+        "This example block inside a tilde code fence MUST NOT be overwritten either!",
+        EXTRACTED_SECTION_END_MARKER,
+        "~~~",
+      ].join("\n")
+    );
+    expect(afterFirstExtract).toContain("User concluding paragraph.");
+    expect(hasExtractedMarkdownSection(afterFirstExtract)).toBe(true);
+    expect(readExtractedMarkdownSection(afterFirstExtract)).toBe(
+      "Extracted AST: `export function init()`"
+    );
+
+    // 3. Subsequent extraction updates ONLY the standalone managed block at the bottom, leaving fenced examples intact
+    const afterSecondExtract = updateExtractedMarkdownSection(
+      afterFirstExtract,
+      "Extracted AST v2: `export function run()`"
+    );
+    expect(afterSecondExtract).toContain(
+      "This example block inside a backtick code fence MUST NOT be overwritten!"
+    );
+    expect(afterSecondExtract).toContain(
+      "This example block inside a tilde code fence MUST NOT be overwritten either!"
+    );
+    expect(readExtractedMarkdownSection(afterSecondExtract)).toBe(
+      "Extracted AST v2: `export function run()`"
+    );
+    expect(
+      updateExtractedMarkdownSection(
+        afterSecondExtract,
+        "Extracted AST v2: `export function run()`"
+      )
+    ).toBe(afterSecondExtract);
+  });
+
+  it("preserves CRLF (\\r\\n) line endings, immediate post-frontmatter text, trailing spaces, and trailing blank lines verbatim", async () => {
+    // 1. Companion document using CRLF (\r\n), no blank line after frontmatter, trailing spaces, and multiple trailing blank lines
+    const crlfDocWithoutBlock = [
+      "---",
+      'file-support-target: "[[win.log]]"',
+      "---",
+      "# Windows Log Notes immediately after frontmatter",
+      "Line with intentional trailing spaces   ",
+      "",
+      "",
+    ].join("\r\n");
+
+    const insertedCrlf = updateExtractedMarkdownSection(
+      crlfDocWithoutBlock,
+      "Line 1\nLine 2"
+    );
+
+    // Every single original byte of crlfDocWithoutBlock must be preserved as prefix
+    expect(insertedCrlf.startsWith(crlfDocWithoutBlock)).toBe(true);
+    // No bare LF (\n not preceded by \r) anywhere in the document
+    expect(insertedCrlf.replace(/\r\n/g, "").includes("\n")).toBe(false);
+    expect(readExtractedMarkdownSection(insertedCrlf)).toBe(
+      "Line 1\r\nLine 2"
+    );
+
+    // Calling again with identical content is byte-for-byte identical
+    expect(updateExtractedMarkdownSection(insertedCrlf, "Line 1\nLine 2")).toBe(
+      insertedCrlf
+    );
+    expect(
+      updateExtractedMarkdownSection(insertedCrlf, "Line 1\r\nLine 2")
+    ).toBe(insertedCrlf);
+
+    // 2. End-to-end middleware refresh on a CRLF companion note skips vault.modify when content is unchanged
+    const env = createInMemoryExtractorVaultEnv();
+    const plugin = new FileSupportPlugin(env.app, createMockManifest());
+    await plugin.onload();
+    plugin.settings.enableMetadataFiles = true;
+    await plugin.saveSettings();
+
+    plugin.extractorRegistry.register({
+      id: "crlf-log-extractor",
+      supports: (f) => f.extension === "log",
+      extract: async () => ({
+        markdownBody: "Line 1\nLine 2",
+      }),
+    });
+
+    const logFile = env.addFile("logs/win.log", undefined, "OK\r\n");
+    env.addFile(
+      "logs/win.md",
+      { "file-support-target": "[[win.log]]" },
+      insertedCrlf
+    );
+
+    env.app.vault.modify.mockClear();
+    await plugin.refreshExtractedMetadataForFile(logFile);
+    // Because CRLF was preserved, updatedContent === currentContent and vault.modify is NOT called!
+    expect(env.app.vault.modify).not.toHaveBeenCalled();
+    expect(env.getFileContent("logs/win.md")).toBe(insertedCrlf);
+
+    await plugin.onunload();
+  });
 });
 
 describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers & Concurrency", () => {
@@ -534,19 +755,30 @@ describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers &
     expect(refreshHeaderBtn.classList.contains("is-disabled")).toBe(true);
     expect(refreshHeaderBtn.getAttribute("aria-disabled")).toBe("true");
 
-    // 2. Create companion note via openOrCreateCompanionForFile (autoRunExtractorOnCreate = true)
+    // Clicking the header refresh button when no companion exists yet shows a feedback Notice
+    Notice.clear();
+    refreshHeaderBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(Notice.instances.length).toBe(1);
+    expect(Notice.instances[0].message).toContain(
+      'No companion metadata note exists for "service.log"'
+    );
+
+    // 2. Create companion note externally via openOrCreateCompanionForFile (autoRunExtractorOnCreate = true)
     const companionFile = await plugin.openOrCreateCompanionForFile(logFile);
     expect(companionFile).not.toBeNull();
     expect(companionFile?.path).toBe("logs/service.md");
     expect(extractSpy).toHaveBeenCalledTimes(1);
 
-    // Verify both YAML frontmatter and managed Markdown block were populated on creation
+    // Verify both YAML frontmatter and managed Markdown block were populated on creation in the single file
     expect(env.frontmatters.get("logs/service.md")).toEqual({
       "file-support-target": "[[service.log]]",
       "log-lines": 2,
       "log-errors": 1,
       tags: ["file-metadata", "extracted-log"],
     });
+    expect(env.getFileContent("logs/service.md")).toContain("log-lines: 2");
+    expect(env.getFileContent("logs/service.md")).toContain("log-errors: 1");
     expect(
       readExtractedMarkdownSection(env.getFileContent("logs/service.md"))
     ).toBe(
@@ -558,8 +790,8 @@ describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers &
       ].join("\n")
     );
 
-    // Reloading or opening the file in SupportedFileView now sees the paired companion and enables the header refresh button
-    await view.onLoadFile(logFile);
+    // SupportedFileView automatically updates its header refresh button to enabled WITHOUT reloading the view!
+    await new Promise((r) => setTimeout(r, 10));
     expect(refreshHeaderBtn.classList.contains("is-disabled")).toBe(false);
     expect(refreshHeaderBtn.getAttribute("aria-disabled")).toBe("false");
 
@@ -665,6 +897,12 @@ describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers &
     env.app.workspace.getActiveViewOfType = vi.fn(() => null);
     env.app.workspace.getActiveFile = vi.fn(() => ineligibleFile);
     expect(refreshCommand.checkCallback(true)).toBe(false);
+
+    // 9. Deleting the companion note externally automatically disables the open SupportedFileView's header refresh button
+    await env.app.vault.delete(companionFile!);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(refreshHeaderBtn.classList.contains("is-disabled")).toBe(true);
+    expect(refreshHeaderBtn.getAttribute("aria-disabled")).toBe("true");
 
     view.onunload();
     await plugin.onunload();
@@ -858,9 +1096,27 @@ describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers &
     expect(Notice.instances[0].message).toContain("OCR worker timed out");
     expect(env.getFileContent("logs/flaky.md")).toBe(originalCompanionContent);
 
-    // 2. Vault modify throws a disk write error
+    // 2. Frontmatter update (processFrontMatter) throws an error
     shouldFailExtract = false;
+    const baseProcessFrontMatter = env.app.fileManager.processFrontMatter;
+    env.app.fileManager.processFrontMatter = vi.fn(async () => {
+      throw new Error("YAML parse error: invalid frontmatter");
+    });
+
+    Notice.clear();
+    const fmFailedResult =
+      await plugin.refreshExtractedMetadataForFile(logFile);
+    expect(fmFailedResult).toBeNull();
+    expect(Notice.instances.length).toBe(1);
+    expect(Notice.instances[0].message).toContain(
+      "YAML parse error: invalid frontmatter"
+    );
+    expect(env.getFileContent("logs/flaky.md")).toBe(originalCompanionContent);
+    env.app.fileManager.processFrontMatter = baseProcessFrontMatter;
+
+    // 3. Vault modify throws a disk write error
     const baseModify = env.app.vault.modify;
+    const contentBeforeModifyFailure = env.getFileContent("logs/flaky.md");
     env.app.vault.modify = vi.fn(async () => {
       throw new Error("ENOSPC: no space left on device");
     });
@@ -871,9 +1127,12 @@ describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers &
     expect(writeFailedResult).toBeNull();
     expect(Notice.instances.length).toBe(1);
     expect(Notice.instances[0].message).toContain("ENOSPC");
-    expect(env.getFileContent("logs/flaky.md")).toBe(originalCompanionContent);
+    expect(env.getFileContent("logs/flaky.md")).toContain(
+      "# Precious User Notes\nMust remain intact on failure."
+    );
+    env.setFileContent("logs/flaky.md", contentBeforeModifyFailure);
 
-    // 3. Subsequent refresh after restoring vault.modify succeeds (queue lock was properly released)
+    // 4. Subsequent refresh after restoring vault.modify succeeds (queue lock was properly released)
     env.app.vault.modify = baseModify;
     const recoveredResult =
       await plugin.refreshExtractedMetadataForFile(logFile);
@@ -884,9 +1143,77 @@ describe("End-to-End Companion Creation, Extractor Execution, Refresh Triggers &
     expect(env.getFileContent("logs/flaky.md")).toContain(
       "# Precious User Notes\nMust remain intact on failure."
     );
+    expect(env.getFileContent("logs/flaky.md")).toContain("status: recovered");
     expect(env.frontmatters.get("logs/flaky.md")?.status).toBe("recovered");
 
     warnSpy.mockRestore();
+    await plugin.onunload();
+  });
+
+  it("uses vault.process atomic read-modify-write so interleaved user edits made while async extract() is running are never clobbered", async () => {
+    const env = createInMemoryExtractorVaultEnv();
+    const plugin = new FileSupportPlugin(env.app, createMockManifest());
+    await plugin.onload();
+
+    plugin.settings.enableMetadataFiles = true;
+    await plugin.saveSettings();
+
+    const logFile = env.addFile("logs/live.log", undefined, "2026-11-15 WARN Slow query");
+    env.addFile(
+      "logs/live.md",
+      { "file-support-target": "[[live.log]]" },
+      [
+        "---",
+        'file-support-target: "[[live.log]]"',
+        "---",
+        "",
+        "# Live Session Notes",
+        "Initial paragraph before extraction starts.",
+        "",
+        EXTRACTED_SECTION_START_MARKER,
+        "Old extracted summary",
+        EXTRACTED_SECTION_END_MARKER,
+      ].join("\n")
+    );
+
+    plugin.extractorRegistry.register({
+      id: "slow-live-extractor",
+      supports: (f) => f.extension === "log",
+      extract: async () => {
+        // Simulate the user typing a new paragraph into the companion note while async extraction is running!
+        const currentDoc = env.getFileContent("logs/live.md");
+        const editedByUserWhileExtracting = currentDoc.replace(
+          "Initial paragraph before extraction starts.",
+          "Initial paragraph before extraction starts.\n\nInterleaved paragraph typed by user while extractor was running!"
+        );
+        env.setFileContent("logs/live.md", editedByUserWhileExtracting);
+
+        await new Promise((r) => setTimeout(r, 15));
+        return {
+          markdownBody: "New extracted summary after slow async extraction",
+          frontmatterProps: {
+            extractedAt: "2026-11-15",
+          },
+        };
+      },
+    });
+
+    const res = await plugin.refreshExtractedMetadataForFile(logFile);
+    expect(res?.markdownBody).toBe(
+      "New extracted summary after slow async extraction"
+    );
+    expect(env.app.vault.process).toHaveBeenCalledTimes(1);
+
+    const finalCompanionText = env.getFileContent("logs/live.md");
+    // Both the interleaved user edit AND the new extracted section AND the updated YAML frontmatter are present!
+    expect(finalCompanionText).toContain(
+      "Interleaved paragraph typed by user while extractor was running!"
+    );
+    expect(finalCompanionText).toContain("extractedAt: 2026-11-15");
+    expect(readExtractedMarkdownSection(finalCompanionText)).toBe(
+      "New extracted summary after slow async extraction"
+    );
+
     await plugin.onunload();
   });
 });

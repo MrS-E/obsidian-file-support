@@ -5,6 +5,7 @@ export {
   REFRESH_EXTRACTED_METADATA_COMMAND_ID,
   REFRESH_EXTRACTED_METADATA_ICON,
   REFRESH_EXTRACTED_METADATA_TITLE,
+  detectLineEnding,
   formatExtractedMarkdownBlock,
   hasExtractedMarkdownSection,
   readExtractedMarkdownSection,
@@ -14,7 +15,10 @@ export {
 export { ExtractorRegistry } from "./ExtractorRegistry";
 export {
   DEFAULT_EXTRACTOR_ID,
+  NONE_EXTRACTOR_ID,
   NOOP_EXTRACTOR_ID,
   NoOpPassthroughExtractor,
+  PASSTHROUGH_EXTRACTOR_ALIASES,
   PassthroughExtractor,
+  isPassthroughExtractorAlias,
 } from "./PassthroughExtractor";

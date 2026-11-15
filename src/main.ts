@@ -197,22 +197,6 @@ export default class FileSupportPlugin
         }
         return true;
       },
-      callback: () => {
-        const targetFile = this.getActiveTargetFile();
-        if (!targetFile) {
-          if (!this.pairResolver.isMetadataEnabled()) {
-            new Notice(
-              "Companion metadata notes are disabled in File Support settings."
-            );
-          } else {
-            new Notice(
-              "No eligible active file to refresh extracted metadata content for."
-            );
-          }
-          return;
-        }
-        void this.refreshExtractedMetadataForFile(targetFile);
-      },
     });
 
     this.addSettingTab(new FileSupportSettingTab(this.app, this));

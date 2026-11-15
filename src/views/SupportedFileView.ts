@@ -1,4 +1,11 @@
-import { App, TFile, TextFileView, WorkspaceLeaf } from "obsidian";
+import {
+  App,
+  type EventRef,
+  Notice,
+  TFile,
+  TextFileView,
+  WorkspaceLeaf,
+} from "obsidian";
 import type { EventBus, UnsubscribeFn } from "../core/EventBus";
 import {
   FileTypeRegistry,
@@ -78,6 +85,12 @@ export class SupportedFileView extends TextFileView {
   private metadataActionEl: HTMLElement | null = null;
   private refreshMetadataActionEl: HTMLElement | null = null;
   private unsubscribeConfig: UnsubscribeFn | null = null;
+  private externalEventRefs: Array<{
+    target: any;
+    name: string;
+    ref: EventRef;
+    fn: (...args: any[]) => any;
+  }> = [];
   private currentMode: EditMode = "readonly";
   private mountedFilePath: string | null = null;
   private mountGeneration: number = 0;
@@ -284,7 +297,9 @@ export class SupportedFileView extends TextFileView {
       return null;
     }
     const pair = this.plugin.pairResolver?.resolve(file);
+    this.updateMetadataActionVisibility();
     if (!pair?.companionFile) {
+      new Notice(`No companion metadata note exists for "${file.name}".`);
       return null;
     }
     try {
@@ -360,7 +375,56 @@ export class SupportedFileView extends TextFileView {
       }
     }
 
+    this.registerExternalStateListeners();
+
     this.initialized = true;
+  }
+
+  private registerExternalStateListeners(): void {
+    if (this.externalEventRefs.length > 0) {
+      return;
+    }
+
+    const scheduleVisibilityRefresh = () => {
+      this.updateMetadataActionVisibility();
+      void Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => {
+          if (this.initialized) {
+            this.updateMetadataActionVisibility();
+          }
+        });
+    };
+
+    const vault = this.app?.vault as any;
+    if (vault && typeof vault.on === "function") {
+      for (const evtName of ["create", "delete", "rename"]) {
+        const ref = vault.on(evtName, scheduleVisibilityRefresh);
+        if (ref) {
+          this.externalEventRefs.push({
+            target: vault,
+            name: evtName,
+            ref,
+            fn: scheduleVisibilityRefresh,
+          });
+        }
+      }
+    }
+
+    const metadataCache = this.app?.metadataCache as any;
+    if (metadataCache && typeof metadataCache.on === "function") {
+      for (const evtName of ["changed", "deleted"]) {
+        const ref = metadataCache.on(evtName, scheduleVisibilityRefresh);
+        if (ref) {
+          this.externalEventRefs.push({
+            target: metadataCache,
+            name: evtName,
+            ref,
+            fn: scheduleVisibilityRefresh,
+          });
+        }
+      }
+    }
   }
 
   private updateMetadataActionVisibility(): void {
@@ -555,6 +619,17 @@ export class SupportedFileView extends TextFileView {
     if (this.unsubscribeConfig) {
       this.unsubscribeConfig();
       this.unsubscribeConfig = null;
+    }
+    for (const entry of this.externalEventRefs.splice(0)) {
+      try {
+        if (typeof entry.target?.offref === "function") {
+          entry.target.offref(entry.ref);
+        } else if (typeof entry.target?.off === "function") {
+          entry.target.off(entry.name, entry.fn);
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
     }
   }
 }

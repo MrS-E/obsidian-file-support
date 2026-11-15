@@ -9,6 +9,8 @@ import type {
 } from "../types/contracts";
 import {
   DEFAULT_EXTRACTOR_ID,
+  NONE_EXTRACTOR_ID,
+  NOOP_EXTRACTOR_ID,
   NoOpPassthroughExtractor,
 } from "./PassthroughExtractor";
 
@@ -85,23 +87,28 @@ export class ExtractorRegistry {
   }
 
   /**
-   * Retrieve a registered adapter by its exact `id`.
+   * Retrieve a registered adapter by its exact `id` (or built-in passthrough aliases `"noop"` / `"none"`).
    */
   get(id: string): ContentExtractorAdapter | undefined {
     if (typeof id !== "string") {
       return undefined;
     }
-    return this.adapters.get(id.trim());
+    const trimmed = id.trim();
+    const direct = this.adapters.get(trimmed);
+    if (direct) {
+      return direct;
+    }
+    if (trimmed === NOOP_EXTRACTOR_ID || trimmed === NONE_EXTRACTOR_ID) {
+      return this.adapters.get(DEFAULT_EXTRACTOR_ID);
+    }
+    return undefined;
   }
 
   /**
-   * Return true if an adapter with `id` is registered.
+   * Return true if an adapter with `id` (or built-in passthrough alias) is registered.
    */
   has(id: string): boolean {
-    if (typeof id !== "string") {
-      return false;
-    }
-    return this.adapters.has(id.trim());
+    return this.get(id) !== undefined;
   }
 
   /**
@@ -122,11 +129,23 @@ export class ExtractorRegistry {
 
     const requestedId = effectiveConfig.extractorId?.trim();
 
-    // 1. Explicit non-default extractorId lookup
+    // 1. Explicit non-default extractorId lookup (including explicit "noop" / "none" passthrough aliases)
     if (requestedId && requestedId !== DEFAULT_EXTRACTOR_ID) {
       const direct = this.adapters.get(requestedId);
       if (direct && direct.supports(file, effectiveConfig)) {
         return direct;
+      }
+      if (
+        requestedId === NOOP_EXTRACTOR_ID ||
+        requestedId === NONE_EXTRACTOR_ID
+      ) {
+        const passthroughAlias = this.adapters.get(DEFAULT_EXTRACTOR_ID);
+        if (
+          passthroughAlias &&
+          passthroughAlias.supports(file, effectiveConfig)
+        ) {
+          return passthroughAlias;
+        }
       }
       return undefined;
     }

@@ -7,6 +7,20 @@ import type {
 
 export const DEFAULT_EXTRACTOR_ID = "passthrough";
 export const NOOP_EXTRACTOR_ID = "noop";
+export const NONE_EXTRACTOR_ID = "none";
+
+export const PASSTHROUGH_EXTRACTOR_ALIASES: ReadonlySet<string> = new Set([
+  DEFAULT_EXTRACTOR_ID,
+  NOOP_EXTRACTOR_ID,
+  NONE_EXTRACTOR_ID,
+]);
+
+export function isPassthroughExtractorAlias(id?: string | null): boolean {
+  if (!id || typeof id !== "string") {
+    return false;
+  }
+  return PASSTHROUGH_EXTRACTOR_ALIASES.has(id.trim());
+}
 
 /**
  * Default no-op passthrough content extractor adapter.
@@ -32,9 +46,7 @@ export class NoOpPassthroughExtractor implements ContentExtractorAdapter {
     return (
       !requested ||
       requested === this.id ||
-      requested === DEFAULT_EXTRACTOR_ID ||
-      requested === NOOP_EXTRACTOR_ID ||
-      requested === "none"
+      isPassthroughExtractorAlias(requested)
     );
   }
 
