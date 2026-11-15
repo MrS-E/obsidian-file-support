@@ -36,8 +36,8 @@ const STANDALONE_START_MARKER_REGEX =
   /^[ \t]*<!-- file-support:extracted:start -->[ \t]*$/;
 const STANDALONE_END_MARKER_REGEX =
   /^[ \t]*<!-- file-support:extracted:end -->[ \t]*$/;
-const FENCE_OPEN_REGEX = /^[ \t]*(`{3,}|~{3,})(.*)$/;
-const FENCE_CLOSE_REGEX = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
+const FENCE_OPEN_REGEX = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE_REGEX = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 interface ScannedBodyLine {
   startOffset: number;
@@ -56,6 +56,11 @@ interface ManagedBlockMatch {
   innerEndOffset: number;
 }
 
+interface MarkdownBodyScan {
+  lines: ScannedBodyLine[];
+  unclosedFence: { char: string; length: number } | null;
+}
+
 /**
  * Detect the line ending style (`"\r\n"` vs `"\n"`) used in a Markdown document.
  */
@@ -65,7 +70,7 @@ export function detectLineEnding(markdown: string): "\r\n" | "\n" {
     : "\n";
 }
 
-function scanMarkdownBodyLines(bodyContent: string): ScannedBodyLine[] {
+function scanMarkdownBodyLines(bodyContent: string): MarkdownBodyScan {
   const lines: ScannedBodyLine[] = [];
   const len = bodyContent.length;
   let pos = 0;
@@ -101,14 +106,10 @@ function scanMarkdownBodyLines(bodyContent: string): ScannedBodyLine[] {
     if (activeFence === null) {
       const openMatch = FENCE_OPEN_REGEX.exec(text);
       if (openMatch) {
-        const fenceRun = openMatch[1];
+        const fenceRun = openMatch[2];
         const fenceChar = fenceRun[0];
-        const rest = openMatch[2];
-        const isSingleLineBacktick = fenceChar === "`" && rest.includes("`");
-        const isSingleLineTilde =
-          fenceChar === "~" &&
-          new RegExp(`~{${fenceRun.length},}[ \\t]*$`).test(rest);
-        if (!isSingleLineBacktick && !isSingleLineTilde) {
+        const infoString = openMatch[3];
+        if (fenceChar !== "`" || !infoString.includes("`")) {
           activeFence = { char: fenceChar, length: fenceRun.length };
           inFence = true;
         }
@@ -125,9 +126,8 @@ function scanMarkdownBodyLines(bodyContent: string): ScannedBodyLine[] {
       }
     }
 
-    const isStartMarker =
-      !inFence && STANDALONE_START_MARKER_REGEX.test(text);
-    const isEndMarker = !inFence && STANDALONE_END_MARKER_REGEX.test(text);
+    const isStartMarker = STANDALONE_START_MARKER_REGEX.test(text);
+    const isEndMarker = STANDALONE_END_MARKER_REGEX.test(text);
 
     lines.push({
       startOffset,
@@ -142,17 +142,17 @@ function scanMarkdownBodyLines(bodyContent: string): ScannedBodyLine[] {
     pos = lineEndOffset;
   }
 
-  return lines;
+  return { lines, unclosedFence: activeFence };
 }
 
 function findManagedExtractedBlock(
   bodyContent: string
 ): ManagedBlockMatch | null {
-  const lines = scanMarkdownBodyLines(bodyContent);
+  const { lines } = scanMarkdownBodyLines(bodyContent);
   let openStartLine: ScannedBodyLine | null = null;
 
   for (const line of lines) {
-    if (line.isStartMarker) {
+    if (!line.inFence && line.isStartMarker) {
       openStartLine = line;
     } else if (line.isEndMarker && openStartLine !== null) {
       return {
@@ -201,6 +201,17 @@ export function formatExtractedMarkdownBlock(
   const normalized = (extractedBody ?? "")
     .replace(/\r\n/g, "\n")
     .replace(/\n+$/, "")
+    .split("\n")
+    .map((line) => {
+      if (
+        STANDALONE_START_MARKER_REGEX.test(line) ||
+        STANDALONE_END_MARKER_REGEX.test(line)
+      ) {
+        return line.replace("<!--", "&lt;!--");
+      }
+      return line;
+    })
+    .join("\n")
     .replace(/\n/g, eol);
   if (normalized.length === 0) {
     return `${EXTRACTED_SECTION_START_MARKER}${eol}${EXTRACTED_SECTION_END_MARKER}`;
@@ -275,13 +286,16 @@ export function updateExtractedMarkdownSection(
   // No existing valid managed block pair in bodyContent.
   // Strip any stray/unmatched standalone marker lines outside fences so future updates never
   // span across user prose, while preserving fenced code blocks and all other bytes verbatim.
-  const scannedLines = scanMarkdownBodyLines(bodyContent);
+  const scannedLines = scanMarkdownBodyLines(bodyContent).lines;
   const hasStrayMarkers = scannedLines.some(
-    (l) => l.isStartMarker || l.isEndMarker
+    (l) => !l.inFence && (l.isStartMarker || l.isEndMarker)
   );
   const cleanedBody = hasStrayMarkers
     ? scannedLines
-        .filter((l) => !l.isStartMarker && !l.isEndMarker)
+        .filter(
+          (l) =>
+            l.inFence || (!l.isStartMarker && !l.isEndMarker)
+        )
         .map((l) => bodyContent.slice(l.startOffset, l.lineEndOffset))
         .join("")
     : bodyContent;
@@ -296,6 +310,15 @@ export function updateExtractedMarkdownSection(
       return `${normalizedFm}${eol}${formattedBlock}${eol}`;
     }
     return `${formattedBlock}${eol}`;
+  }
+
+  const { unclosedFence } = scanMarkdownBodyLines(cleanedBody);
+  if (unclosedFence !== null) {
+    const bodyWithLineEnding = /(?:\r\n|\r|\n)$/.test(cleanedBody)
+      ? cleanedBody
+      : `${cleanedBody}${eol}`;
+    const closingFence = unclosedFence.char.repeat(unclosedFence.length);
+    return `${frontmatterPrefix}${bodyWithLineEnding}${closingFence}${eol}${eol}${formattedBlock}${eol}`;
   }
 
   // Leave frontmatterPrefix and cleanedBody 100% unchanged and append the managed block at the end.

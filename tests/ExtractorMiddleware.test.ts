@@ -408,6 +408,105 @@ describe("ExtractorRegistry & NoOpPassthroughExtractor", () => {
 });
 
 describe("Structured Managed Markdown Section Updater", () => {
+  it.each([
+    {
+      name: "closes an unfinished user backtick fence before appending",
+      existingMarkdown: [
+        "---",
+        'file-support-target: "[[server.log]]"',
+        "---",
+        "User notes",
+        "```typescript",
+        "const unfinished = true;",
+        "",
+      ].join("\r\n"),
+      extractedBody: "Summary",
+      expectedBody: "Summary",
+      preservedText: "const unfinished = true;",
+      expectedClosingText: "const unfinished = true;\r\n```\r\n\r\n",
+    },
+    {
+      name: "does not treat a four-space-indented fence as a fenced block",
+      existingMarkdown: [
+        "User notes",
+        "    ```literal",
+        EXTRACTED_SECTION_START_MARKER,
+        "Old extraction",
+        EXTRACTED_SECTION_END_MARKER,
+        "Keep this note",
+        "",
+      ].join("\r\n"),
+      extractedBody: "Updated extraction",
+      expectedBody: "Updated extraction",
+      preservedText: "Keep this note",
+      expectedClosingText: "",
+    },
+    {
+      name: "recognizes tilde fences whose info string contains tildes",
+      existingMarkdown: [
+        "User notes",
+        "~~~language~~~",
+        "Unfinished tilde fence",
+        "",
+      ].join("\r\n"),
+      extractedBody: "Summary",
+      expectedBody: "Summary",
+      preservedText: "Unfinished tilde fence",
+      expectedClosingText: "Unfinished tilde fence\r\n~~~\r\n\r\n",
+    },
+    {
+      name: "keeps an extracted unclosed fence inside its managed block",
+      existingMarkdown: "Manual note\r\n",
+      extractedBody: "```typescript\r\nconst useful = true;\r\n",
+      expectedBody: "```typescript\r\nconst useful = true;",
+      preservedText: "Manual note",
+      expectedClosingText: "",
+    },
+    {
+      name: "neutralizes extracted delimiter lines without losing their text",
+      existingMarkdown: "Manual note\r\n",
+      extractedBody: [
+        "~~~yaml~info",
+        EXTRACTED_SECTION_START_MARKER,
+        "Useful extracted text",
+        EXTRACTED_SECTION_END_MARKER,
+      ].join("\r\n"),
+      expectedBody: [
+        "~~~yaml~info",
+        EXTRACTED_SECTION_START_MARKER.replace("<!--", "&lt;!--"),
+        "Useful extracted text",
+        EXTRACTED_SECTION_END_MARKER.replace("<!--", "&lt;!--"),
+      ].join("\r\n"),
+      preservedText: "Manual note",
+      expectedClosingText: "",
+    },
+  ])("is stable across three applications: $name", ({
+    existingMarkdown,
+    extractedBody,
+    expectedBody,
+    preservedText,
+    expectedClosingText,
+  }) => {
+    let updated = existingMarkdown;
+
+    for (let application = 0; application < 3; application++) {
+      updated = updateExtractedMarkdownSection(updated, extractedBody);
+
+      expect(updated.split(EXTRACTED_SECTION_START_MARKER).length - 1).toBe(1);
+      expect(updated.split(EXTRACTED_SECTION_END_MARKER).length - 1).toBe(1);
+      expect(hasExtractedMarkdownSection(updated)).toBe(true);
+      expect(readExtractedMarkdownSection(updated)).toBe(expectedBody);
+      expect(updated).toContain(preservedText);
+      expect(updated.replace(/\r\n/g, "").includes("\n")).toBe(false);
+
+      if (expectedClosingText) {
+        expect(updated).toContain(
+          `${expectedClosingText}${EXTRACTED_SECTION_START_MARKER}`
+        );
+      }
+    }
+  });
+
   it("inserts, updates, and reads the managed block idempotently while preserving YAML frontmatter, manual notes, and $-tokens", () => {
     const initialCompanionDoc = [
       "---",
