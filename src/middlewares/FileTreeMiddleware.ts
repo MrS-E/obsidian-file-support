@@ -59,6 +59,13 @@ function isPluginBadgeElement(el: Element): boolean {
   );
 }
 
+function isNativeFileTagElement(node: Element): boolean {
+  return (
+    Boolean(node.classList?.contains?.("nav-file-tag")) &&
+    !isPluginBadgeElement(node)
+  );
+}
+
 function isPluginBadgeOrDescendant(node: Node): boolean {
   if (isElementNode(node)) {
     if (isPluginBadgeElement(node)) {
@@ -1028,6 +1035,9 @@ export class FileTreeMiddleware {
     if (!isElementNode(node)) {
       return false;
     }
+    if (isNativeFileTagElement(node)) {
+      return true;
+    }
     if (
       node.classList?.contains("nav-file") ||
       node.classList?.contains("nav-file-title") ||
@@ -1041,7 +1051,8 @@ export class FileTreeMiddleware {
     }
     if (typeof node.querySelector === "function") {
       return Boolean(
-        node.querySelector(".nav-file, .nav-file-title, [data-path]")
+        node.querySelector(".nav-file, .nav-file-title, [data-path]") ||
+          node.querySelector(".nav-file-tag:not(.file-support-badge)")
       );
     }
     return false;
@@ -1326,7 +1337,7 @@ export class FileTreeMiddleware {
         void this.refreshAllFileExplorers(paths);
       };
 
-      for (const evtName of ["changed", "deleted", "resolved"] as const) {
+      for (const evtName of ["changed", "deleted"] as const) {
         const ref = metadataCache.on(evtName, onCacheChanged);
         if (ref) {
           this.metadataCacheEventRefs.push({

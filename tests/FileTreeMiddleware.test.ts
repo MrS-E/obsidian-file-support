@@ -838,4 +838,75 @@ describe("FileTreeMiddleware, File Explorer Badges, Companion Hiding/Underlining
     expect(env.app.workspace.listenerCount("layout-change")).toBe(0);
     expect(env.app.workspace.listenerCount("file-menu")).toBe(0);
   });
+
+  it("does not run a full File Explorer redecorate on metadataCache resolved and only path-filters changed/deleted passes", async () => {
+    const env = createTestVaultAndDomEnv();
+    env.addFile("logs/server.log");
+    env.addFile("logs/other.log");
+    const logsFolder = env.addTreeFolderItem(env.navContainer, "logs");
+    env.addTreeFileItem(logsFolder.childrenEl, "logs/server.log");
+    env.addTreeFileItem(logsFolder.childrenEl, "logs/other.log");
+
+    const plugin = new FileSupportPlugin(env.app, createMockManifest());
+    await plugin.onload();
+    plugin.settings.enableMetadataFiles = true;
+    plugin.settings.metadataDirRegex = "^logs";
+    await plugin.saveSettings();
+
+    expect(env.app.metadataCache.listenerCount("resolved")).toBe(0);
+
+    const treeDecorateSpy = vi.fn();
+    plugin.eventBus.on("tree:decorate", treeDecorateSpy);
+
+    // 1. Firing `resolved` (Obsidian does this after every metadata change once indexing is done)
+    //    must NOT trigger any full-tree redecorate pass
+    env.app.metadataCache.trigger("resolved");
+    await new Promise((r) => setTimeout(r, 25));
+    expect(treeDecorateSpy).not.toHaveBeenCalled();
+
+    // 2. A `changed` event for a single file triggers exactly one pass scoped to that path
+    const serverLog = env.files.get("logs/server.log")!;
+    env.app.metadataCache.trigger("changed", serverLog);
+    await new Promise((r) => setTimeout(r, 25));
+    expect(treeDecorateSpy).toHaveBeenCalledTimes(1);
+    expect(treeDecorateSpy.mock.calls[0][0].filePaths).toEqual([
+      "logs/server.log",
+    ]);
+
+    await plugin.onunload();
+  });
+
+  it("removes a plugin-injected .nav-file-tag badge when a native .nav-file-tag is appended to the same title later", async () => {
+    const env = createTestVaultAndDomEnv();
+    env.addFile("logs/server.log");
+    const logsFolder = env.addTreeFolderItem(env.navContainer, "logs");
+    const logDom = env.addTreeFileItem(logsFolder.childrenEl, "logs/server.log");
+
+    const plugin = new FileSupportPlugin(env.app, createMockManifest());
+    await plugin.onload();
+
+    // Plugin badge is injected first (no native badge existed yet)
+    expect(logDom.titleEl.querySelectorAll(".nav-file-tag").length).toBe(1);
+    expect(
+      logDom.titleEl
+        .querySelector(".nav-file-tag")
+        ?.classList.contains("file-support-badge")
+    ).toBe(true);
+
+    // Obsidian later appends its own native `.nav-file-tag` to the same title
+    const nativeTag = document.createElement("div");
+    nativeTag.className = "nav-file-tag";
+    nativeTag.textContent = "LOG";
+    logDom.titleEl.appendChild(nativeTag);
+
+    await new Promise((r) => setTimeout(r, 25));
+
+    // The plugin duplicate is removed; only the native tag remains
+    const tags = logDom.titleEl.querySelectorAll(".nav-file-tag");
+    expect(tags.length).toBe(1);
+    expect(tags[0]).toBe(nativeTag);
+    expect(tags[0].classList.contains("file-support-badge")).toBe(false);
+
+    await plugin.onunload();
+  });
 });
