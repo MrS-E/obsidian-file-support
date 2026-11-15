@@ -14,6 +14,7 @@ import {
 } from "./embeds/FileEmbedWidget";
 import { ExtractorRegistry } from "./extractors/ExtractorRegistry";
 import { LazyPairResolver } from "./metadata/LazyPairResolver";
+import { ArchiveMiddleware } from "./middlewares/ArchiveMiddleware";
 import {
   ExtractorMiddleware,
   REFRESH_EXTRACTED_METADATA_COMMAND_ID,
@@ -96,6 +97,7 @@ export default class FileSupportPlugin
   rendererRegistry: RendererRegistry = new RendererRegistry();
   textCodeRendererMiddleware: TextCodeRendererMiddleware =
     new TextCodeRendererMiddleware(this.rendererRegistry);
+  archiveMiddleware: ArchiveMiddleware = new ArchiveMiddleware();
   pairResolver: LazyPairResolver = new LazyPairResolver(
     this.app,
     () => this.settings,
@@ -131,6 +133,7 @@ export default class FileSupportPlugin
     this.extractorMiddleware.register(this.eventBus);
     this.metadataCompanionMiddleware.register(this.eventBus);
     this.textCodeRendererMiddleware.register(this.eventBus);
+    this.archiveMiddleware.register(this.eventBus);
     this.fileTreeMiddleware.register(this.eventBus);
 
     this.registerView(
@@ -209,6 +212,7 @@ export default class FileSupportPlugin
     this.metadataCompanionMiddleware.destroy();
     this.extractorMiddleware.destroy();
     this.textCodeRendererMiddleware.destroy();
+    this.archiveMiddleware.destroy();
     this.eventBus.clear();
   }
 
