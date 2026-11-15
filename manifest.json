@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-file-support",
+  "name": "File Support",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "First-class viewing, inline embedding, File Explorer badges, and optional companion metadata notes for text, code, log, patch, and extensible file types.",
+  "author": "Obsidian File Support Contributors",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

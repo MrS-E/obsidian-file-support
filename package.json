@@ -1,0 +1,45 @@
+{
+  "name": "obsidian-file-support",
+  "version": "0.1.0",
+  "description": "Modular Obsidian plugin adding first-class viewing, inline embedding, File Explorer badges, and optional companion metadata notes for text, code, log, patch, and extensible file types.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "file-support",
+    "codemirror",
+    "embed",
+    "metadata"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@codemirror/commands": "^6.6.0",
+    "@codemirror/lang-cpp": "^6.0.2",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/lang-json": "^6.0.1",
+    "@codemirror/lang-python": "^6.1.6",
+    "@codemirror/lang-xml": "^6.1.0",
+    "@codemirror/lang-yaml": "^6.1.1",
+    "@codemirror/language": "^6.10.2",
+    "@codemirror/legacy-modes": "^6.4.0",
+    "@codemirror/search": "^6.5.6",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.28.4",
+    "@types/node": "^20.14.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.5",
+    "jsdom": "^24.1.0",
+    "obsidian": "^1.6.7",
+    "tslib": "^2.6.3",
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.5"
+  }
+}

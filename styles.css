@@ -1,0 +1,73 @@
+/* Obsidian File Support Plugin Styles */
+
+/* File Explorer Extension Badge */
+.nav-file-tag.file-support-badge {
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+/* Companion Metadata File Explorer Decoration */
+.nav-file.is-companion-hidden {
+  display: none !important;
+}
+
+.nav-file-title.has-companion-metadata .nav-file-title-content {
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+/* Inline Embed Container */
+.file-support-embed-container {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  margin: 0.5em 0;
+  overflow: hidden;
+  background-color: var(--background-primary);
+}
+
+.file-support-embed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background-color: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-small, 12px);
+}
+
+.file-support-embed-title {
+  font-weight: 600;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-support-embed-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-support-embed-editor {
+  max-height: 400px;
+  overflow: auto;
+}
+
+/* Settings UI */
+.file-support-settings-regex-error {
+  border-color: var(--text-error) !important;
+}
+
+.file-support-settings-regex-message {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller, 11px);
+  margin-top: 4px;
+}
+
+.file-support-filetype-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
