@@ -170,9 +170,24 @@ function createPreset(
 }
 
 /**
+ * Create a read-only archive preset rendered by the archive viewer middleware.
+ * `createPreset` defaults to the CM6 text renderer, so the renderer ID is overridden here.
+ */
+function createArchivePreset(
+  extension: string,
+  badgeLabel: string
+): FileTypeConfig {
+  return {
+    ...createPreset(extension, "binary", badgeLabel, "plaintext", "readonly"),
+    rendererId: "archive-viewer",
+  };
+}
+
+/**
  * Built-in file type presets.
  * - Editable tabs by default for code, data, and txt files.
  * - Read-only tabs by default for log, patch, and diff files.
+ * - Read-only tabs and embeds for archive files rendered by the archive viewer.
  * - Read-only inline embeds by default for all supported file types.
  */
 export const DEFAULT_FILE_TYPE_PRESETS: Readonly<
@@ -197,6 +212,16 @@ export const DEFAULT_FILE_TYPE_PRESETS: Readonly<
   log: Object.freeze(createPreset("log", "log", "LOG", "log", "readonly")),
   patch: Object.freeze(createPreset("patch", "patch", "PATCH", "diff", "readonly")),
   diff: Object.freeze(createPreset("diff", "patch", "DIFF", "diff", "readonly")),
+  tar: Object.freeze(createArchivePreset("tar", "TAR")),
+  tgz: Object.freeze(createArchivePreset("tgz", "TGZ")),
+  gz: Object.freeze(createArchivePreset("gz", "TGZ")),
+  tbz2: Object.freeze(createArchivePreset("tbz2", "TBZ2")),
+  tbz: Object.freeze(createArchivePreset("tbz", "TBZ2")),
+  bz2: Object.freeze(createArchivePreset("bz2", "TBZ2")),
+  txz: Object.freeze(createArchivePreset("txz", "TXZ")),
+  xz: Object.freeze(createArchivePreset("xz", "TXZ")),
+  tzst: Object.freeze(createArchivePreset("tzst", "TZST")),
+  zst: Object.freeze(createArchivePreset("zst", "TZST")),
 });
 
 /**
