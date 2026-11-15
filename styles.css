@@ -17,6 +17,35 @@
   text-underline-offset: 3px;
 }
 
+/* Dedicated Tab View & CodeMirror 6 Wrapper */
+.file-support-view-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+.file-support-view-editor-host {
+  flex: 1 1 auto;
+  height: 100%;
+  overflow: auto;
+}
+
+.file-support-cm6-wrapper {
+  height: 100%;
+  font-family: var(--font-monospace);
+  font-size: var(--font-text-size, 14px);
+}
+
+.file-support-cm6-wrapper.is-readonly .cm-editor {
+  background-color: var(--background-primary-alt, var(--background-primary));
+}
+
+.file-support-cm6-tab-wrapper .cm-editor {
+  height: 100%;
+}
+
 /* Inline Embed Container */
 .file-support-embed-container {
   border: 1px solid var(--background-modifier-border);
@@ -34,6 +63,14 @@
   background-color: var(--background-secondary);
   border-bottom: 1px solid var(--background-modifier-border);
   font-size: var(--font-ui-small, 12px);
+  gap: 8px;
+}
+
+.file-support-embed-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .file-support-embed-title {
@@ -42,6 +79,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-support-embed-mode {
+  font-size: var(--font-ui-smaller, 11px);
+  color: var(--text-muted);
 }
 
 .file-support-embed-actions {

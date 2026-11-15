@@ -37,12 +37,105 @@ export class TFolder extends TAbstractFile {
   }
 }
 
-export class Plugin {
+export class Component {
+  private _loaded: boolean = false;
+  private _children: Component[] = [];
+  private _callbacks: Array<() => any> = [];
+
+  load(): void {
+    if (this._loaded) return;
+    this._loaded = true;
+    this.onload();
+    for (const child of this._children) {
+      child.load();
+    }
+  }
+
+  onload(): void {}
+
+  unload(): void {
+    if (!this._loaded) {
+      // Still run onunload and callbacks even if load() wasn't explicitly called
+      this.onunload();
+    } else {
+      this._loaded = false;
+      this.onunload();
+    }
+    for (const child of [...this._children]) {
+      child.unload();
+    }
+    this._children = [];
+    for (const cb of this._callbacks.splice(0)) {
+      try {
+        cb();
+      } catch {
+        // Ignore cleanup callback errors
+      }
+    }
+  }
+
+  onunload(): void {}
+
+  addChild<T extends Component>(component: T): T {
+    this._children.push(component);
+    if (this._loaded) {
+      component.load();
+    }
+    return component;
+  }
+
+  removeChild<T extends Component>(component: T): T {
+    const idx = this._children.indexOf(component);
+    if (idx !== -1) {
+      this._children.splice(idx, 1);
+      component.unload();
+    }
+    return component;
+  }
+
+  register(cb: () => any): void {
+    this._callbacks.push(cb);
+  }
+
+  registerEvent(_eventRef: any): void {}
+
+  registerDomEvent(
+    el: any,
+    type: string,
+    callback: any,
+    options?: any
+  ): void {
+    if (el && typeof el.addEventListener === "function") {
+      el.addEventListener(type, callback, options);
+      this.register(() => el.removeEventListener?.(type, callback, options));
+    }
+  }
+
+  registerInterval(id: number): number {
+    return id;
+  }
+}
+
+export class MarkdownRenderChild extends Component {
+  containerEl: HTMLElement;
+
+  constructor(containerEl: HTMLElement) {
+    super();
+    this.containerEl = containerEl;
+  }
+}
+
+export class Plugin extends Component {
   app: App;
   manifest: any;
   private _data: any = {};
+  _views: Record<string, (leaf: WorkspaceLeaf) => any> = {};
+  _registeredExtensions: Array<{ extensions: string[]; viewType: string }> = [];
+  _postProcessors: any[] = [];
+  _editorExtensions: any[] = [];
 
   constructor(app?: App, manifest?: any) {
+    super();
     this.app = app ?? new App();
     this.manifest = manifest ?? { id: "obsidian-file-support", name: "File Support", version: "0.1.0" };
   }
@@ -59,12 +152,18 @@ export class Plugin {
   addCommand(_command: any): any {
     return _command;
   }
-  registerView(_type: string, _viewCreator: any): void {}
-  registerExtensions(_extensions: string[], _viewType: string): void {}
-  registerEvent(_eventRef: any): void {}
-  registerDomEvent(_el: any, _type: string, _callback: any, _options?: any): void {}
-  registerMarkdownPostProcessor(_postProcessor: any, _sortOrder?: number): any {
-    return _postProcessor;
+  registerView(type: string, viewCreator: (leaf: WorkspaceLeaf) => any): void {
+    this._views[type] = viewCreator;
+  }
+  registerExtensions(extensions: string[], viewType: string): void {
+    this._registeredExtensions.push({ extensions: [...extensions], viewType });
+  }
+  registerMarkdownPostProcessor(postProcessor: any, _sortOrder?: number): any {
+    this._postProcessors.push(postProcessor);
+    return postProcessor;
+  }
+  registerEditorExtension(extension: any): void {
+    this._editorExtensions.push(extension);
   }
 }
 
@@ -146,11 +245,24 @@ export function createMockElement(tag: string = "div"): any {
       children.push(child);
       return child;
     },
+    removeChild(child: any) {
+      const idx = children.indexOf(child);
+      if (idx !== -1) {
+        children.splice(idx, 1);
+      }
+      return child;
+    },
+    get firstChild() {
+      return children[0] ?? null;
+    },
     setAttribute(name: string, val: string) {
       attributes[name] = val;
     },
     getAttribute(name: string) {
       return attributes[name] ?? null;
+    },
+    removeAttribute(name: string) {
+      delete attributes[name];
     },
     addEventListener(type: string, fn: Function) {
       if (!listeners[type]) listeners[type] = [];
@@ -368,19 +480,75 @@ export class Setting {
 
 export class WorkspaceLeaf {
   view: any = null;
+  openFile = async (_file: TFile) => {};
 }
 
-export class TextFileView {
+export class ItemView extends Component {
   app: App;
   leaf: WorkspaceLeaf;
-  file: TFile | null = null;
-  data: string = "";
   contentEl: any;
+  _actions: Array<{ icon: string; title: string; callback: (evt: any) => any; el: any }> = [];
 
   constructor(leaf: WorkspaceLeaf) {
+    super();
     this.leaf = leaf;
     this.app = new App();
     this.contentEl = createMockElement("div");
+  }
+
+  getViewType(): string {
+    return "";
+  }
+
+  getDisplayText(): string {
+    return "";
+  }
+
+  getIcon(): string {
+    return "document";
+  }
+
+  addAction(icon: string, title: string, callback: (evt: MouseEvent) => any): any {
+    const actionEl = createMockElement("a");
+    actionEl.setAttribute("aria-label", title);
+    actionEl.setAttribute("data-icon", icon);
+    actionEl.addEventListener("click", callback);
+    this._actions.push({ icon, title, callback, el: actionEl });
+    return actionEl;
+  }
+}
+
+export class FileView extends ItemView {
+  allowNoFile: boolean = false;
+  file: TFile | null = null;
+  navigation: boolean = true;
+
+  canAcceptExtension(_extension: string): boolean {
+    return true;
+  }
+}
+
+export class TextFileView extends FileView {
+  data: string = "";
+
+  constructor(leaf: WorkspaceLeaf) {
+    super(leaf);
+  }
+
+  async onLoadFile(file: TFile): Promise<void> {
+    this.file = file;
+    const content = await this.app.vault.read(file);
+    this.setViewData(content, true);
+  }
+
+  async onUnloadFile(_file: TFile): Promise<void> {
+    this.clear();
+  }
+
+  async save(_clear?: boolean): Promise<void> {
+    if (this.file) {
+      await this.app.vault.modify(this.file, this.getViewData());
+    }
   }
 
   getViewData(): string {
@@ -396,9 +564,11 @@ export class TextFileView {
   }
 
   requestSave(): void {}
+}
 
-  addAction(_icon: string, _title: string, _callback: (evt: MouseEvent) => any): any {
-    return createMockElement("a");
+export function setIcon(parent: any, iconId: string): void {
+  if (parent && typeof parent.setAttribute === "function") {
+    parent.setAttribute("data-icon", iconId);
   }
 }
 
@@ -452,6 +622,10 @@ export function createMockTFile(path: string): TFile {
 
 export function createMockApp(): App {
   return new App();
+}
+
+export function createMockLeaf(): any {
+  return new WorkspaceLeaf();
 }
 
 export function createMockManifest(): any {

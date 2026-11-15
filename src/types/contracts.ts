@@ -118,6 +118,7 @@ export interface RendererMountContext {
   subpath?: string;
   onContentChange?: (newData: string) => void;
   onOpenMetadata?: (file: TFile) => void;
+  onOpenFile?: (file: TFile) => void;
 }
 
 /**
@@ -139,6 +140,23 @@ export interface RendererAdapter {
   readonly id: string;
   supports?(config: FileTypeConfig): boolean;
   mount(ctx: RendererMountContext): Promise<RendererInstance> | RendererInstance;
+}
+
+/**
+ * Generic renderer middleware contract for subscribing to 'file:open', 'file:embed',
+ * and 'config:updated' on the central EventBus without altering core view/embed wiring.
+ */
+export interface RendererMiddleware {
+  readonly id: string;
+  supports(config: FileTypeConfig): boolean;
+  mountView(
+    payload: FileOpenEventPayload
+  ): Promise<RendererInstance> | RendererInstance;
+  mountEmbed(
+    payload: FileEmbedEventPayload
+  ): Promise<RendererInstance> | RendererInstance;
+  onConfigChange?(payload: ConfigUpdatedEventPayload): Promise<void> | void;
+  destroy(): void;
 }
 
 /**
@@ -183,6 +201,7 @@ export interface FileEmbedEventPayload {
   containerEl: HTMLElement;
   mode: EditMode;
   subpath?: string;
+  data?: string;
   onOpenFile?: (file: TFile) => void;
   onOpenMetadata?: (file: TFile) => void;
   instance?: RendererInstance;

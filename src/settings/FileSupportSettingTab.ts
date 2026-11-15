@@ -97,6 +97,9 @@ export class FileSupportSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.metadataDirRegex)
         .onChange(async (value) => {
           updateRegexValidationUI(value, text.inputEl);
+          if (this.plugin.settings.metadataDirRegex === value) {
+            return;
+          }
           this.plugin.settings.metadataDirRegex = value;
           await this.plugin.saveSettings();
         });
@@ -117,7 +120,10 @@ export class FileSupportSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.metadataFrontmatterKey)
           .onChange(async (value) => {
             const trimmed = value.trim();
-            if (trimmed.length > 0) {
+            if (
+              trimmed.length > 0 &&
+              this.plugin.settings.metadataFrontmatterKey !== trimmed
+            ) {
               this.plugin.settings.metadataFrontmatterKey = trimmed;
               await this.plugin.saveSettings();
             }
@@ -220,9 +226,19 @@ export class FileSupportSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             const badgeLabel =
               value.trim().toUpperCase() || cfg.extension.toUpperCase();
-            await this.plugin.updateFileTypeConfig(cfg.extension, {
-              badgeLabel,
-            });
+            const current = this.plugin.registry.get(cfg.extension);
+            if (current && current.badgeLabel === badgeLabel) {
+              return;
+            }
+            const updated = await this.plugin.updateFileTypeConfig(
+              cfg.extension,
+              {
+                badgeLabel,
+              }
+            );
+            setting.setDesc(
+              `Category: ${updated.category} | Language: ${updated.languageId} | Badge: ${updated.badgeLabel}`
+            );
           })
       );
 
